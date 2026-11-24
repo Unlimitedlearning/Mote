@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# 运行产物：会话事件、任务库、上传的图片
+memory/
+
+# 导入用的原始导出数据（含个人对话），不进版本库
+deepseek_data/
+
+# 迁移工具里拖入的导出包与解压中间产物
+/deepseek对话迁移/*.zip
+/deepseek对话迁移/_解压/
+
+# 本机配置（可能含绝对路径与 key）；example 保留
+/config.json
+/config.*.json
+!/config.example.json
+*.local.json
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

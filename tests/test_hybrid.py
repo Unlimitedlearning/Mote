@@ -1,0 +1,145 @@
+"""混合链路：本地直答不调云端，云端只收压缩上下文，模型名写进每条回答。"""
+
+import copy
+import tempfile
+import unittest
+
+from mote import config as config_mod
+from mote.agent import Agent
+from mote.llm import Reply
+
+
+class RecordingLLM:
+    def __init__(self, replies, model="deepseek-chat"):
+        self.replies = list(replies)
+        self.model = model
+        self.calls = []
+        self.tools_seen = []
+
+    def chat(self, messages, tools=None, stream=False, on_delta=None):
+        self.calls.append(copy.deepcopy(messages))
+        self.tools_seen.append(copy.deepcopy(tools))
+        reply = self.replies.pop(0)
+        if on_delta and reply.content:
+            on_delta(reply.content)
+        return reply
+
+
+class Router:
+    def __init__(self, content, model="qwen-local", reasoning=""):
+        self.content = content
+        self.model = model
+        self.reasoning = reasoning
+        self.calls = []
+
+    def chat(self, messages, tools=None, stream=False, on_delta=None):
+        self.calls.append(messages)
+        return Reply(content=self.content, reasoning=self.reasoning)
+
+
+class HybridTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cfg(self):
+        cfg = copy.deepcopy(config_mod.DEFAULT)
+        cfg["profiles"]["cloud"]["api_key"] = "sk-test"
+        cfg["profiles"]["local"]["base_url"] = "http://127.0.0.1:9/v1"
+        cfg["hybrid"]["enabled"] = True
+        cfg["hybrid"]["worker_profile"] = "cloud"
+        cfg["hybrid"]["context_chars"] = 120
+        cfg["_memory_root"] = self.tmp.name
+        return cfg
+
+    def build(self, router_content, worker_replies):
+        router = Router(router_content)
+        worker = RecordingLLM(worker_replies)
+        agent = Agent(self.cfg(), llm_client=worker, router_client=router,
+                      hybrid={"enabled": True}, memory_root=self.tmp.name,
+                      system_prompt="SYS")
+        return agent, router, worker
+
+    def test_local_answer_never_calls_worker(self):
+        agent, router, worker = self.build(
+            '{"route":"local","answer":"这是本地回答","context":"","tools":[]}', [])
+        result = agent.ask("在吗")
+        self.assertEqual(result["route"], "local")
+        self.assertEqual(result["model"], "qwen-local")
+        self.assertEqual(result["worker"], "local")
+        self.assertEqual(len(worker.calls), 0)
+        self.assertEqual(len(router.calls), 1)
+        event = [e for e in agent.memory.events() if e["t"] == "assistant"][0]
+        self.assertEqual(event["model"], "qwen-local")
+        self.assertEqual(event["route"], "local")
+
+    def test_local_answer_keeps_router_thinking(self):
+        agent, router, worker = self.build(
+            '{"route":"local","answer":"这是本地回答","context":"","tools":[]}', [])
+        router.reasoning = "只是打招呼，走本地直答就够了"
+        result = agent.ask("在吗")
+        self.assertEqual(result["route"], "local")
+        # 本地直答没有 worker 调用，思考过程来自路由那次调用
+        self.assertEqual(result["thinking"], "只是打招呼，走本地直答就够了")
+        event = [e for e in agent.memory.events() if e["t"] == "assistant"][0]
+        self.assertEqual(event["thinking"], "只是打招呼，走本地直答就够了")
+        self.assertEqual(agent.memory.thinking_for(result["node"]),
+                         "只是打招呼，走本地直答就够了")
+
+    def test_cloud_gets_compressed_context_and_filtered_tools(self):
+        agent, router, worker = self.build(
+            '{"route":"cloud","context":"压缩背景","tools":["now","use_lens"]}',
+            [Reply(tool_calls=[{"id": "c1", "name": "now", "arguments": "{}"}]),
+             Reply(content="最终回答")])
+        result = agent.ask("这个方案有什么隐患")
+        self.assertEqual(result["route"], "cloud")
+        self.assertEqual(result["model"], "deepseek-chat")
+        self.assertEqual(result["tools"], [{"name": "now", "ok": True}])
+        self.assertEqual(len(worker.calls), 2)
+        self.assertIn("[压缩上下文]\n压缩背景", worker.calls[0][1]["content"])
+        self.assertFalse(any("状态卡" in (m.get("content") or "")
+                             for m in worker.calls[0]))
+        names = {item["function"]["name"] for item in worker.tools_seen[0]}
+        self.assertEqual(names, {"now", "use_lens"})
+        # 第二轮请求必须同时带上一条 tool_calls 与它的结果，缺一条接口会拒
+        second = worker.calls[1]
+        self.assertIn("assistant", [m["role"] for m in second])
+        self.assertEqual(len([m for m in second if m["role"] == "tool"]), 1)
+        history = agent.memory.conversation()
+        self.assertEqual(history[-1]["model"], "deepseek-chat")
+        self.assertEqual(history[-1]["route"], "cloud")
+
+    def test_direct_mode_skips_local_router(self):
+        agent, router, worker = self.build(
+            '{"route":"local","answer":"不应出现","context":"","tools":[]}',
+            [Reply(content="直接问云端")])
+        result = agent.ask("这个方案有什么隐患", mode="direct")
+        self.assertEqual(result["mode"], "direct")
+        self.assertEqual(result["route"], "direct")
+        self.assertEqual(result["text"], "直接问云端")
+        self.assertEqual(len(router.calls), 0)
+        self.assertEqual(len(worker.calls), 1)
+
+    def test_hybrid_mode_uses_local_router(self):
+        agent, router, worker = self.build(
+            '{"route":"local","answer":"先本地处理","context":"","tools":[]}', [])
+        result = agent.ask("在吗", mode="hybrid")
+        self.assertEqual(result["mode"], "hybrid")
+        self.assertEqual(result["route"], "local")
+        self.assertEqual(len(router.calls), 1)
+        self.assertEqual(len(worker.calls), 0)
+
+    def test_bad_router_json_falls_back(self):
+        agent, _, worker = self.build("模型没有输出 JSON", [Reply(content="兜底回答")])
+        result = agent.ask("关键问题")
+        self.assertEqual(result["route"], "cloud")
+        self.assertTrue(result["fallback"])
+        self.assertTrue(any("关键问题" in (m.get("content") or "")
+                            for m in worker.calls[0]))
+        self.assertEqual(len(worker.calls), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

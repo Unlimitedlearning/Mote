@@ -1,0 +1,62 @@
+{
+  "default_profile": "cloud",
+  "profiles": {
+    "local": {
+      "base_url": "http://localhost:11434/v1",
+      "model": "qwen3.5:4b",
+      "api_key": "ollama",
+      "temperature": 0.3,
+      "max_tokens": 2048,
+      "timeout": 180
+    },
+    "cloud": {
+      "base_url": "https://api.deepseek.com/v1",
+      "model": "deepseek-chat",
+      "api_key": "${DEEPSEEK_API_KEY}",
+      "temperature": 0.3,
+      "thinking": true,
+      "max_tokens": 8192,
+      "timeout": 240
+    },
+    "qwen-cloud": {
+      "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+      "model": "qwen-plus",
+      "api_key": "${DASHSCOPE_API_KEY}",
+      "temperature": 0.3,
+      "max_tokens": 2048,
+      "timeout": 180
+    }
+  },
+  "agent": {
+    "default_session": "main",
+    "max_steps": 12,
+    "lenses_per_turn": 5,
+    "compact_context_chars": 24000,
+    "compact_keep_turns": 2,
+    "compact_keep_tool_turns": 3,
+    "compact_keep_msg_chars": 3000,
+    "compact_thoughts": 3,
+    "compact_thought_chars": 1200,
+    "state_card_chars": 1600,
+    "resume_messages": 8,
+    "system_prompt": "prompts/system.md",
+    "memory_dir": "memory",
+    "tools": [
+      "now",
+      "use_lens"
+    ]
+  },
+  "server": {
+    "host": "127.0.0.1",
+    "port": 9000
+  },
+  "hybrid": {
+    "enabled": true,
+    "router_profile": "local",
+    "worker_profile": "cloud",
+    "fallback_worker": "local",
+    "context_chars": 700,
+    "router_max_tokens": 2048,
+    "local_answer_max_tokens": 1024
+  }
+}
