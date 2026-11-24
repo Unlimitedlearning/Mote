@@ -196,6 +196,12 @@ mark.find.on{background:#ffb020;box-shadow:0 0 0 2px #ffb02040}
 /* 主分支：不在当前链路上时是绿色；与当前链路重合时保留蓝底、加一圈绿色描边 */
 .tm-node.main .dot{fill:#2fa36b}
 .tm-node.main.on .dot{fill:#5b8bf0;stroke:#2fa36b;stroke-width:1.6}
+/* 分支树缩放：拖动空白处平移，Ctrl+滚轮或在页脚按钮里缩放 */
+#treeBox{cursor:grab}
+#treeBox.panning{cursor:grabbing;user-select:none}
+.tree-zoom{display:flex;align-items:center;gap:4px}
+#treeModal .tree-zoom button{padding:3px 9px;font-size:12px;line-height:1.5;min-width:28px}
+#treeModal .tree-zoom .pct{min-width:56px;font-variant-numeric:tabular-nums}
 .tree-legend{display:flex;align-items:center;gap:12px;margin-right:auto;font-size:11px;color:var(--muted);flex-wrap:wrap}
 .tree-legend span{display:inline-flex;align-items:center;gap:5px}
 .tree-legend i{display:inline-block;width:9px;height:9px;border-radius:50%;background:#ccd1da}
@@ -279,7 +285,14 @@ textarea{flex:1;border:0;outline:0;resize:none;max-height:160px;min-height:26px;
  <div class="dialog">
   <div class="head"><b>对话分支树</b><span class="tree-stat" id="treeStat"></span><button type="button" data-close="treeModal">关闭</button></div>
   <div class="body" id="treeBox"></div>
-  <div class="foot"><div class="tree-legend"><span><i></i>其他分支</span><span><i class="main"></i>主分支</span><span><i class="path"></i>当前分支</span><span><i class="cur"></i>当前位置</span></div><button type="button" data-close="treeModal">完成</button></div>
+  <div class="foot"><div class="tree-legend"><span><i></i>其他分支</span><span><i class="main"></i>主分支</span><span><i class="path"></i>当前分支</span><span><i class="cur"></i>当前位置</span></div>
+   <div class="tree-zoom">
+    <button type="button" id="zoomOut" title="缩小">−</button>
+    <button type="button" class="pct" id="zoomPct" title="恢复 100%">100%</button>
+    <button type="button" id="zoomIn" title="放大">+</button>
+    <button type="button" id="zoomFit" title="缩到一屏能看全宽度">适应宽度</button>
+   </div>
+   <button type="button" data-close="treeModal">完成</button></div>
  </div>
 </div>
 <div class="modal" id="editModal">
@@ -324,7 +337,7 @@ textarea{flex:1;border:0;outline:0;resize:none;max-height:160px;min-height:26px;
 <div id="note"></div>
 <script>
 const $=id=>document.getElementById(id);
-const state={sessions:[],current:null,messages:[],names:{},tree:null,busy:false,seq:0,editNode:null,settingsMode:'hybrid',ctrl:null,retry:null,hits:[],hitTotal:0,hitSeq:0,searchTimer:null,win:40,treePos:null,settings:null,find:{open:false,q:'',hits:[],cur:-1,scroll:false,dirty:false,painted:false}};
+const state={sessions:[],current:null,messages:[],names:{},tree:null,busy:false,seq:0,editNode:null,settingsMode:'hybrid',ctrl:null,retry:null,hits:[],hitTotal:0,hitSeq:0,searchTimer:null,win:40,treePos:null,settings:null,zoom:1,zoomAuto:true,treeDragMoved:false,find:{open:false,q:'',hits:[],cur:-1,scroll:false,dirty:false,painted:false}};
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
@@ -848,6 +861,7 @@ function renderTree(){
   state.treePos=(act&&pos[act.id])?pos[act.id]:null;
   const forks=nodes.filter(n=>(n.children||[]).length>1).length;
   if(stat)stat.textContent='共 '+nodes.length+' 个问题'+(forks?' · '+forks+' 处分叉':'');
+  treeZoomStyle();
 }
 async function openTree(){
   if(state.busy)return;
@@ -858,11 +872,56 @@ async function openTree(){
   $('treeModal').classList.add('show');
   await new Promise(r=>requestAnimationFrame(()=>r()));
   renderTree();
-  const box=$('treeBox'), at=state.treePos;
-  if(at){
-    box.scrollLeft=Math.max(0,at.x-box.clientWidth/2);
-    box.scrollTop=Math.max(0,at.y-box.clientHeight/2);
+  const zbox=$('treeBox'), zsvg=zbox.querySelector('.tree-map svg');
+  if(state.zoomAuto&&zsvg&&Number(zsvg.getAttribute('width'))>zbox.clientWidth-40)treeFit();
+  else centerOnNode();
+}
+
+// ── 分支树缩放：zoom 落在 .tree-map 上，滚动条、点击坐标都跟着一起缩
+const TREE_ZMIN=0.15, TREE_ZMAX=2.5;
+function treeZoomStyle(){
+  const box=$('treeBox'), map=box.querySelector('.tree-map');
+  if(!map)return;
+  map.style.zoom=state.zoom;
+  const svg=map.querySelector('svg');
+  const w=(Number(svg&&svg.getAttribute('width'))||0)*state.zoom;
+  // 缩小后能一屏放下的树重新居中，否则左对齐保留横向滚动
+  map.classList.toggle('narrow',w<box.clientWidth-8);
+  $('zoomPct').textContent=Math.round(state.zoom*100)+'%';
+}
+function centerOnNode(){
+  const box=$('treeBox'), at=state.treePos, z=state.zoom||1;
+  if(!at){box.scrollLeft=0;box.scrollTop=0;return;}
+  box.scrollLeft=Math.max(0,at.x*z-box.clientWidth/2);
+  box.scrollTop=Math.max(0,at.y*z-box.clientHeight/2);
+}
+// 以鼠标位置（缺省为视口中心）为锚点缩放，缩放前后锚点下的内容不动
+function treeZoom(z,ax,ay){
+  const box=$('treeBox'), map=box.querySelector('.tree-map');
+  if(!map){$('zoomPct').textContent=Math.round((state.zoom||1)*100)+'%';return;}
+  const old=state.zoom||1;
+  state.zoomAuto=false;
+  z=Math.max(TREE_ZMIN,Math.min(TREE_ZMAX,z));
+  if(Math.abs(z-old)<0.001){treeZoomStyle();return;}
+  const px=ax==null?box.clientWidth/2:ax, py=ay==null?box.clientHeight/2:ay;
+  const cx=(box.scrollLeft+px)/old, cy=(box.scrollTop+py)/old;
+  state.zoom=z;map.style.zoom=z;
+  box.scrollLeft=Math.max(0,cx*z-px);
+  box.scrollTop=Math.max(0,cy*z-py);
+  treeZoomStyle();
+}
+// 只缩小不放大：宽树缩到一屏，窄树保持原样
+function treeFit(){
+  const box=$('treeBox'), svg=box.querySelector('.tree-map svg');
+  if(!svg)return;
+  const w=Number(svg.getAttribute('width'))||1;
+  state.zoom=Math.max(TREE_ZMIN,Math.min(1,box.clientWidth/(w+24)));
+  treeZoomStyle();
+  if(box.scrollWidth>box.clientWidth-4){
+    state.zoom=Math.max(TREE_ZMIN,state.zoom*(box.clientWidth-4)/box.scrollWidth);
+    treeZoomStyle();
   }
+  centerOnNode();
 }
 
 function revealNode(node,role){
@@ -1394,7 +1453,41 @@ $('findInput').addEventListener('keydown',e=>{
   e.stopPropagation();
 });
 $('branchBtn').onclick=openTree;
+$('zoomIn').onclick=()=>treeZoom((state.zoom||1)*1.25);
+$('zoomOut').onclick=()=>treeZoom((state.zoom||1)/1.25);
+$('zoomPct').onclick=()=>treeZoom(1);
+$('zoomFit').onclick=treeFit;
+$('treeBox').addEventListener('wheel',e=>{
+  if(!e.ctrlKey)return;
+  e.preventDefault();
+  const r=$('treeBox').getBoundingClientRect();
+  treeZoom((state.zoom||1)*(e.deltaY<0?1.12:1/1.12),e.clientX-r.left,e.clientY-r.top);
+},{passive:false});
+// 空白处拖动平移：位移过阈值才算拖动，松手后吞掉这次 click，免得误触跳转
+let treePan=null;
+function endTreePan(){
+  if(!treePan)return;
+  const moved=treePan.moved;
+  treePan=null;$('treeBox').classList.remove('panning');
+  if(moved){state.treeDragMoved=true;setTimeout(()=>{state.treeDragMoved=false;},260);}
+}
+$('treeBox').addEventListener('pointerdown',e=>{
+  if(e.button!==0||e.target.closest('[data-node]'))return;
+  const box=$('treeBox');
+  treePan={x:e.clientX,y:e.clientY,left:box.scrollLeft,top:box.scrollTop,moved:false};
+  try{box.setPointerCapture(e.pointerId);}catch(_){}
+});
+$('treeBox').addEventListener('pointermove',e=>{
+  if(!treePan)return;
+  const box=$('treeBox'),dx=e.clientX-treePan.x,dy=e.clientY-treePan.y;
+  if(!treePan.moved&&Math.abs(dx)+Math.abs(dy)<4)return;
+  treePan.moved=true;box.classList.add('panning');
+  box.scrollLeft=treePan.left-dx;box.scrollTop=treePan.top-dy;
+});
+$('treeBox').addEventListener('pointerup',endTreePan);
+$('treeBox').addEventListener('pointercancel',endTreePan);
 $('treeBox').onclick=e=>{
+  if(state.treeDragMoved)return;
   const b=e.target.closest('[data-node]');
   if(b&&b.dataset.node)jumpToNode(b.dataset.node);
 };
