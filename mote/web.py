@@ -119,6 +119,18 @@ main{flex:1;min-width:0;display:flex;flex-direction:column;background:#fff;posit
 .topbar .status{font-size:12px;color:var(--accent)}
 .top-btn{border:1px solid var(--line);background:#fff;border-radius:8px;padding:4px 10px;color:var(--text);font-size:12px;white-space:nowrap}
 .top-btn:hover{border-color:#c9d6f5;background:#f8faff}
+/* 对话内查找：占用顶栏下方一条，不遮正文 */
+.findbar{display:none;flex:0 0 auto;align-items:center;gap:5px;padding:7px 18px;border-bottom:1px solid var(--line);background:#fbfcfe}
+.findbar.show{display:flex}
+.findbar .fhint{flex:1;font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.findbar input{width:190px;border:1px solid #dcdfe6;background:#fff;border-radius:7px;padding:4px 9px;outline:0;font-size:12.5px}
+.findbar input:focus{border-color:#a9c4fb}
+.findbar input.none{color:#b3261e;background:#fdf5f4;border-color:#f3c6c2}
+.findbar .fc{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums;min-width:56px;text-align:center}
+.findbar button{border:0;background:transparent;color:#5b6270;width:24px;height:24px;border-radius:6px;font-size:13px;line-height:1;padding:0}
+.findbar button:hover{background:var(--hover);color:var(--text)}
+mark.find{background:#ffe58a;color:inherit;border-radius:2px;padding:0 1px}
+mark.find.on{background:#ffb020;box-shadow:0 0 0 2px #ffb02040}
 .msg.user .bubble{position:relative}
 .msg-actions{display:flex;justify-content:flex-end;margin-top:2px}
 .msg-more{border:0;background:transparent;color:var(--muted);border-radius:5px;padding:0 5px;font-size:14px;line-height:1.2;opacity:.65}
@@ -221,6 +233,9 @@ textarea{flex:1;border:0;outline:0;resize:none;max-height:160px;min-height:26px;
  aside{position:absolute;z-index:20;height:100%;box-shadow:6px 0 20px #00000012}
  .suggest{grid-template-columns:1fr}
  .thread{padding:14px 14px 30px}
+ .findbar{padding:7px 12px}
+ .findbar .fhint{display:none}
+ .findbar input{width:auto;flex:1;min-width:0}
 }
 </style>
 </head>
@@ -238,9 +253,18 @@ textarea{flex:1;border:0;outline:0;resize:none;max-height:160px;min-height:26px;
   <button class="icon-btn" id="toggle" title="展开/收起侧栏">☰</button>
   <div class="title" id="topTitle">新对话</div>
   <span class="status" id="status"></span>
+  <button class="top-btn" id="findBtn" title="在当前对话里查找（Ctrl+F）">⌕ 查找</button>
   <button class="top-btn" id="branchBtn" title="查看当前对话的分支树">⑂ 分支树</button>
   <button class="top-btn" id="setBtn" title="设置模型与 API Key">⚙ 设置</button>
   <div class="model" id="model"></div>
+ </div>
+ <div class="findbar" id="findbar">
+  <span class="fhint">只查当前对话 · 打完按 Enter 定位 · ↑↓ 翻看 · Esc 关闭</span>
+  <input id="findInput" type="text" spellcheck="false" placeholder="查找内容，回车定位">
+  <span class="fc" id="findCount">0/0</span>
+  <button type="button" id="findPrev" title="上一处（Shift+Enter）">↑</button>
+  <button type="button" id="findNext" title="下一处（Enter）">↓</button>
+  <button type="button" id="findClose" title="关闭（Esc）">✕</button>
  </div>
  <div class="scroll" id="scroll"><div class="thread" id="thread"></div></div>
  <button class="to-latest" id="toLatest">↓ 跳到最新</button>
@@ -300,7 +324,7 @@ textarea{flex:1;border:0;outline:0;resize:none;max-height:160px;min-height:26px;
 <div id="note"></div>
 <script>
 const $=id=>document.getElementById(id);
-const state={sessions:[],current:null,messages:[],names:{},tree:null,busy:false,seq:0,editNode:null,settingsMode:'hybrid',ctrl:null,retry:null,hits:[],hitTotal:0,hitSeq:0,searchTimer:null,win:40,treePos:null,settings:null};
+const state={sessions:[],current:null,messages:[],names:{},tree:null,busy:false,seq:0,editNode:null,settingsMode:'hybrid',ctrl:null,retry:null,hits:[],hitTotal:0,hitSeq:0,searchTimer:null,win:40,treePos:null,settings:null,find:{open:false,q:'',hits:[],cur:-1,scroll:false,dirty:false,painted:false}};
 
 function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 
@@ -419,7 +443,11 @@ function paintPending(){
   if(old&&old.open){const next=bubble.querySelector('.think');if(next)next.open=true;}
 }
 
-function winStart(){return Math.max(0,state.messages.length-state.win);}
+// 窗口默认取末尾 win 条；查找跳转会临时指定 [winFrom, winEnd) 这一小段，
+// 否则上千轮的导入会话里定位一句话要把整段历史重绘一遍
+function winStart(){return state.winFrom!=null?state.winFrom:Math.max(0,state.messages.length-state.win);}
+function winEnd(){return state.winEnd!=null?Math.min(state.winEnd,state.messages.length):state.messages.length;}
+function resetWin(){state.win=40;state.winFrom=null;state.winEnd=null;}
 function branchIndex(){
   const nodes=(state.tree&&state.tree.nodes)||[];
   const groups={};
@@ -444,7 +472,7 @@ function branchNavFor(node,index){
 }
 function renderMessages(keep){
   const scroll=$('scroll'), prevTop=scroll.scrollTop, prevHeight=scroll.scrollHeight;
-  const box=$('thread'); box.innerHTML='';
+  const box=$('thread'); box.innerHTML='';state.find.painted=false;
   if(!state.messages.length){
     const e=document.createElement('div'); e.className='empty';
     e.innerHTML='<div class="big">M</div><h2>带一个问题来</h2><p>我会挑几个思维镜头，给你判断建议。任务清单由你自己管。</p>'+
@@ -454,16 +482,20 @@ function renderMessages(keep){
     e.querySelectorAll('.suggest button').forEach(b=>b.onclick=()=>{$('q').value=b.textContent;$('q').focus();});
     $('toLatest').classList.remove('show');return;
   }
-  const start=winStart(), index=branchIndex();
+  const start=winStart(), end=winEnd(), index=branchIndex();
   let lastAnswer=-1;
   state.messages.forEach((m,i)=>{if(m.role==='assistant'&&m.node)lastAnswer=i;});
   if(start>0){
     const more=document.createElement('button');more.type='button';more.className='load-more';
     more.textContent='加载更早的 '+start+' 条';
-    more.onclick=()=>{state.win+=150;renderMessages(true);};
+    more.onclick=()=>{
+      if(state.winFrom!=null)state.winFrom=Math.max(0,start-150);
+      else state.win+=150;
+      renderMessages(true);
+    };
     box.appendChild(more);
   }
-  state.messages.slice(start).forEach((m,offset)=>{
+  state.messages.slice(start,end).forEach((m,offset)=>{
     const i=start+offset;
     const row=document.createElement('div');row.className='msg '+(m.role==='user'?'user':'assistant');
     const av=document.createElement('div');av.className='avatar '+(m.role==='user'?'u':'m');av.textContent=m.role==='user'?'你':'M';
@@ -523,9 +555,17 @@ function renderMessages(keep){
     else if(m.role==='assistant'&&m.node)row.dataset.ansnode=m.node;
     row.appendChild(av);row.appendChild(bubble);box.appendChild(row);
   });
+  if(end<state.messages.length){
+    const rest=state.messages.length-end;
+    const more=document.createElement('button');more.type='button';more.className='load-more';
+    more.textContent='加载更新的 '+Math.min(150,rest)+' 条';
+    more.onclick=()=>{state.winEnd=Math.min(state.messages.length,end+150);renderMessages(true);};
+    box.appendChild(more);
+  }
   if(keep)scroll.scrollTop=prevTop+(scroll.scrollHeight-prevHeight);
   else scroll.scrollTop=scroll.scrollHeight;
   $('toLatest').classList.remove('show');
+  if(state.find.open&&!state.find.dirty&&state.find.q)paintFind();
 }
 
 function groupOf(s){
@@ -664,7 +704,8 @@ async function loadSessions(){
 }
 async function select(id,push){
   if(push)setHash(id);
-  state.current=id;state.messages=[];state.tree=null;state.win=40;const seq=++state.seq;
+  closeFind();
+  state.current=id;state.messages=[];state.tree=null;resetWin();const seq=++state.seq;
   renderSessions();setTitle();renderMessages();
   try{
     const r=await fetch('/sessions/'+encodeURIComponent(id)+'/messages');
@@ -676,7 +717,8 @@ async function select(id,push){
 }
 function newChat(push){
   ++state.seq;if(push)setHash(null);
-  state.current=null;state.messages=[];state.tree=null;state.win=40;renderSessions();setTitle();renderMessages();$('q').focus();
+  closeFind();
+  state.current=null;state.messages=[];state.tree=null;resetWin();renderSessions();setTitle();renderMessages();$('q').focus();
 }
 function openFromHash(){
   const id=readHash();
@@ -836,6 +878,7 @@ function revealNode(node,role){
   if(idx<0)idx=pick('assistant');
   if(idx<0)return;
   const fromEnd=state.messages.length-idx;
+  state.winFrom=null;state.winEnd=null;
   if(fromEnd>state.win)state.win=fromEnd+20;
 }
 // 界面当前显示的那条链的末端：跳转、删除、提问都以它为准，主分支不参与
@@ -985,6 +1028,7 @@ async function jumpToNode(node,role){
     if(seq!==state.seq)return;
     if(!r.ok||d.error)throw new Error(d.error||'切换失败');
     state.messages=d.messages||[];state.tree=d.tree||state.tree;
+    syncFind();
     closeModal('treeModal');revealNode(node,role);renderMessages(true);setTitle();
     focusQuestion(node,role);
   }catch(err){alert('切换分支失败：'+err.message);}
@@ -999,6 +1043,155 @@ function focusQuestion(node,role){
   row.scrollIntoView({block:'center'});
   target.classList.add('q-hit');
   setTimeout(()=>target.classList.remove('q-hit'),1200);
+}
+// ── 对话内查找：数据先算命中，界面只负责标黄与滚动；窗口外的命中在跳转时扩窗
+function findHits(q){
+  const needle=q.toLowerCase(), out=[];
+  if(!needle)return out;
+  state.messages.forEach((m,i)=>{
+    const text=String(m.text||'');if(!text)return;
+    const low=text.toLowerCase();let at=low.indexOf(needle);
+    while(at>=0){out.push({i:i,at:at});at=low.indexOf(needle,at+needle.length);}
+  });
+  return out;
+}
+function clearFindMarks(){
+  $('thread').querySelectorAll('mark.find').forEach(mk=>{
+    const p=mk.parentNode;if(!p)return;
+    p.replaceChild(document.createTextNode(mk.textContent),mk);p.normalize();
+  });
+}
+function markIn(root,needle){
+  if(!needle)return;
+  const walker=document.createTreeWalker(root,NodeFilter.SHOW_TEXT,null);
+  const nodes=[];let node;
+  while((node=walker.nextNode())){
+    const text=node.nodeValue;if(!text||!text.trim())continue;
+    const el=node.parentElement;
+    if(el&&el.closest('button,mark,textarea,script,style,.q-foot'))continue;
+    if(text.toLowerCase().indexOf(needle)>=0)nodes.push(node);
+  }
+  nodes.forEach(node=>{
+    const text=node.nodeValue,low=text.toLowerCase(),frag=document.createDocumentFragment();
+    let at=0,hit;
+    while((hit=low.indexOf(needle,at))>=0){
+      if(hit>at)frag.appendChild(document.createTextNode(text.slice(at,hit)));
+      const mk=document.createElement('mark');mk.className='find';
+      mk.textContent=text.slice(hit,hit+needle.length);
+      frag.appendChild(mk);at=hit+needle.length;
+    }
+    if(at<text.length)frag.appendChild(document.createTextNode(text.slice(at)));
+    if(node.parentNode)node.parentNode.replaceChild(frag,node);
+  });
+}
+function paintFind(){
+  const f=state.find, hits=f.hits, thread=$('thread');
+  clearFindMarks();
+  $('findCount').textContent=(hits.length?f.cur+1:0)+'/'+hits.length;
+  $('findInput').classList.toggle('none',!f.dirty&&!!f.q&&!hits.length);
+  if(!f.q||!hits.length)return;
+  const needle=f.q.toLowerCase(), start=winStart(), end=winEnd(), rows=thread.children, off=start>0?1:0;
+  // 只标窗口内的行：命中总数按数据算，不必为了显示把整段历史塞进 DOM
+  state.messages.slice(start,end).forEach((m,i)=>{
+    if(m.pending)return;
+    if(String(m.text||'').toLowerCase().indexOf(needle)<0)return;
+    const row=rows[i+off];if(!row)return;
+    const bubble=row.querySelector('.bubble');if(bubble)markIn(bubble,needle);
+  });
+  const cur=hits[Math.max(f.cur,0)];
+  const row=rows[cur.i-start+off];if(!row)return;
+  let k=0;
+  for(let j=0;j<f.cur;j++)if(hits[j].i===cur.i)k++;
+  const marks=row.querySelectorAll('mark.find');
+  const mk=marks[k]||marks[marks.length-1];
+  if(!mk)return;
+  mk.classList.add('on');
+  f.painted=true;
+  // 只有主动换命中时才滚动，重新渲染（加载更早/更新）不该把视野拽回来
+  if(f.scroll){f.scroll=false;mk.scrollIntoView({block:'center'});}
+}
+// 命中已在窗口内且已铺好标黄时，翻下一处只挪 .on 与视野，不重铺上千个 mark
+function paintFindMove(){
+  const f=state.find,h=f.hits[f.cur];if(!h)return false;
+  const start=winStart(),rows=$('thread').children,off=start>0?1:0;
+  const row=rows[h.i-start+off];if(!row)return false;
+  let k=0;
+  for(let j=0;j<f.cur;j++)if(f.hits[j].i===h.i)k++;
+  const marks=row.querySelectorAll('mark.find');
+  const mk=marks[k]||marks[marks.length-1];
+  if(!mk)return false;
+  const prev=$('thread').querySelector('mark.find.on');if(prev)prev.classList.remove('on');
+  mk.classList.add('on');
+  $('findCount').textContent=(f.cur+1)+'/'+f.hits.length;
+  mk.scrollIntoView({block:'center'});
+  return true;
+}
+// 当前命中不在窗口里就把窗口挪到它前后几十条，别为了看一眼重绘整段历史
+function jumpFindCur(){
+  const f=state.find,h=f.hits[f.cur];
+  if(!h)return;
+  const start=winStart(), end=winEnd();
+  f.scroll=true;
+  if(h.i<start||h.i>=end){
+    state.winFrom=Math.max(0,h.i-4);
+    state.winEnd=Math.min(state.messages.length,h.i+40);
+    renderMessages(true);
+  }else paintFind();
+}
+// 切换分支、删除问答后消息换了，命中表跟着重算，序号越界就归零
+function syncFind(){
+  const f=state.find;
+  if(!f.open||f.dirty||!f.q)return;
+  f.hits=findHits(f.q);
+  if(f.cur>=f.hits.length)f.cur=f.hits.length?0:-1;
+}
+// 打字阶段只标记「还没查」，不跳也不标黄，避免边打边跳
+function markFindDirty(){
+  const f=state.find;
+  f.dirty=true;f.hits=[];f.cur=-1;f.painted=false;
+  clearFindMarks();
+  $('findCount').textContent='0/0';
+  $('findInput').classList.remove('none');
+}
+// step 正负表示相对当前命中前后翻；查询词变了就先定位到离视野最近的一条
+function findNav(step){
+  const f=state.find, q=$('findInput').value.trim();
+  if(!q){
+    f.q='';f.dirty=false;f.hits=[];f.cur=-1;f.painted=false;
+    clearFindMarks();$('findCount').textContent='0/0';
+    $('findInput').classList.remove('none');return;
+  }
+  if(f.dirty||q!==f.q){
+    f.q=q;f.hits=findHits(q);f.dirty=false;f.cur=-1;
+    if(!f.hits.length){paintFind();return;}
+    // 从离当前视图最近的一条开始，往上翻更符合「刚说过什么」的直觉
+    const end=winEnd();
+    let pick=f.hits.length-1;
+    while(pick>0&&f.hits[pick].i>=end)pick--;
+    f.cur=pick;
+    jumpFindCur();return;
+  }
+  if(!step||!f.hits.length)return;
+  const n=f.hits.length;
+  f.cur=((f.cur<0?0:f.cur)+step+n)%n;
+  if(f.painted&&paintFindMove())return;
+  jumpFindCur();
+}
+function openFind(){
+  state.find.open=true;$('findbar').classList.add('show');
+  const input=$('findInput');
+  // 选中一段文字再按 Ctrl+F，直接拿它当查询词
+  const sel=String((window.getSelection&&window.getSelection().toString())||'').trim();
+  if(sel&&sel.length<=60&&sel.indexOf('\n')<0&&!input.value){input.value=sel;markFindDirty();}
+  input.focus();input.select();
+}
+function closeFind(){
+  const f=state.find;
+  f.open=false;f.q='';f.hits=[];f.cur=-1;f.scroll=false;f.dirty=false;f.painted=false;
+  $('findbar').classList.remove('show');
+  $('findInput').value='';$('findInput').classList.remove('none');
+  $('findCount').textContent='0/0';
+  clearFindMarks();
 }
 function beginEdit(node){
   const m=state.messages.find(x=>x.role==='user'&&x.node===node);
@@ -1022,7 +1215,7 @@ async function deleteTurn(node){
     const d=await r.json();
     if(seq!==state.seq)return;
     if(!r.ok||d.error)throw new Error(d.error||'删除失败');
-    state.messages=d.messages||[];state.tree=d.tree||null;
+    state.messages=d.messages||[];state.tree=d.tree||null;syncFind();
     await loadSessions();await loadTree();renderMessages();setTitle();
   }catch(err){alert('删除失败：'+err.message);}
 }
@@ -1101,7 +1294,8 @@ async function send(override,opts){
     const at=state.messages.findIndex(m=>m.role==='user'&&m.node===opts.parent);
     if(at>=0)state.messages=state.messages.slice(0,at+1);
   }
-  state.messages.push(userMsg);state.messages.push(pending);renderMessages(false);
+  state.messages.push(userMsg);state.messages.push(pending);
+  state.winFrom=null;state.winEnd=null;renderMessages(false);
   const tick=setInterval(()=>{
     const el=$('thread').querySelector('.thinking .secs');
     if(el)el.textContent=((Date.now()-started)/1000).toFixed(0)+'s';
@@ -1187,6 +1381,18 @@ function retryLast(){
   state.messages=state.messages.filter(m=>!m.error);
   send(last.text,last.opts);
 }
+$('findBtn').onclick=openFind;
+$('findClose').onclick=()=>{closeFind();$('q').focus();};
+$('findPrev').onclick=()=>findNav(-1);
+$('findNext').onclick=()=>findNav(1);
+$('findInput').addEventListener('input',markFindDirty);
+$('findInput').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){e.preventDefault();findNav(e.shiftKey?-1:1);}
+  else if(e.key==='ArrowDown'){e.preventDefault();findNav(1);}
+  else if(e.key==='ArrowUp'){e.preventDefault();findNav(-1);}
+  else if(e.key==='Escape'){e.preventDefault();closeFind();$('q').focus();}
+  e.stopPropagation();
+});
 $('branchBtn').onclick=openTree;
 $('treeBox').onclick=e=>{
   const b=e.target.closest('[data-node]');
@@ -1288,6 +1494,14 @@ $('thread').addEventListener('click',e=>{
   }).catch(()=>{e.target.textContent='复制失败';});
 });
 window.addEventListener('popstate',openFromHash);
+// Ctrl+F 只在对话已打开时接管，其余情况仍交给浏览器
+document.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&!e.altKey&&!e.shiftKey&&e.key.toLowerCase()==='f'){
+    if(!state.current||!state.messages.length||document.querySelector('.modal.show'))return;
+    e.preventDefault();openFind();return;
+  }
+  if(e.key==='Escape'&&state.find.open&&!document.querySelector('.modal.show'))closeFind();
+},true);
 
 function applyHealth(health){
   if(!health)return;
