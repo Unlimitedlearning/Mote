@@ -7,7 +7,7 @@ import pathlib
 import tempfile
 import unittest
 
-from mote import memory as memory_mod
+from mote.services.conversation import Conversation
 
 MODULE_PATH = pathlib.Path(__file__).resolve().parent.parent / "tools" / "import_deepseek.py"
 spec = importlib.util.spec_from_file_location("import_deepseek", MODULE_PATH)
@@ -73,7 +73,7 @@ class ImportDeepSeekTest(unittest.TestCase):
         self.assertEqual(events[7]["node"], "ds-3-4")
         self.assertNotIn("忽略我", json.dumps(events, ensure_ascii=False))
 
-        memory = memory_mod.Memory(root, "test-session")
+        memory = Conversation(root, "test-session")
         tree = memory.branch_tree()
         by_id = {item["id"]: item for item in tree["nodes"]}
         self.assertEqual(set(by_id), {"ds-1-2", "ds-3-4", "ds-5-x"})

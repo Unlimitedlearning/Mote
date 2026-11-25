@@ -56,17 +56,21 @@ export MOTE_NO_BROWSER=1            # serve 时不自动开浏览器
 | `compact_keep_msg_chars` | `3000` | 单条保留消息的字数上限 |
 | `compact_thoughts` / `compact_thought_chars` | `3` / `1200` | 保留的思考段数与每段字数 |
 
-## hybrid：本地前置
+## hybrid：问答方式与本地前置
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `enabled` | `true` | 关闭则走 legacy 直连 |
-| `router_profile` | `local` | 本地路由器端点 |
-| `worker_profile` | `cloud` | 复杂请求交给谁 |
+| `mode` | `hybrid` | `hybrid` 本地先判断再决定；`direct` 每条直连云端；`local` 只用本地端点 |
+| `enabled` | `true` | 旧字段，等同 `mode == "hybrid"`；单独改它时 `mode` 跟着同步 |
+| `router_profile` | `local` | 本地路由器端点；`mode=local` 时也是唯一的回答端点 |
+| `worker_profile` | `cloud` | 复杂请求交给谁（`hybrid` / `direct` 用） |
 | `fallback_worker` | `local` | 云端 key 缺失时回退到谁 |
 | `context_chars` | `700` | 喂给云端的压缩上下文上限 |
 | `router_max_tokens` | `2048` | 路由器 JSON 预算（512 不够，4B 推理会吃光） |
-| `local_answer_max_tokens` | `1024` | 本地直答预算 |
+| `local_answer_max_tokens` | `2048` | `mode=local` 时的回答预算 |
+
+`mode=local` 时不需要云端 key，也不需要 `worker_profile` 可解析；
+`/health` 的 `needs_setup` 会因此返回 `false`，首次打开不会再弹设置面板。
 
 ## server：监听
 

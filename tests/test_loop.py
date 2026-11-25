@@ -9,10 +9,13 @@ import copy
 import tempfile
 import unittest
 
-from mote import config as config_mod
-from mote import memory as memory_mod
-from mote.agent import Agent
-from mote.llm import Reply
+from mote.core import config as config_mod
+from mote.core.ids import DEFAULT_SESSION
+from mote.services import library
+from mote.services import settings as settings_mod
+from mote.services.conversation import Conversation
+from mote.services.agent import Agent
+from mote.infra.llm import Reply
 
 
 class ScriptedLLM:
@@ -84,7 +87,8 @@ class AgentLoopTest(unittest.TestCase):
         kinds = [e["t"] for e in agent.memory.events()]
         self.assertEqual(kinds, ["session", "user", "assistant", "tool", "assistant"])
 
-    def test_duplicate_lens_blocked_across_steps(self):
+    def test_lens_state_guards(self):
+        # 同一轮内重复加载：工具层拒绝，镜头只算一次
         agent, _ = self.build([
             Reply(tool_calls=[lens_call(1)]),
             Reply(tool_calls=[lens_call(2)]),
@@ -92,20 +96,20 @@ class AgentLoopTest(unittest.TestCase):
         ])
         result = agent.ask("换个角度")
         self.assertEqual(result["lenses"], ["inversion"])
-        events = [e for e in agent.memory.events() if e["t"] == "tool"]
-        self.assertFalse(events[1]["ok"])
-        self.assertIn("不要重复加载", events[1]["result"])
+        tool_events = [e for e in agent.memory.events() if e["t"] == "tool"]
+        self.assertFalse(tool_events[1]["ok"])
+        self.assertIn("不要重复加载", tool_events[1]["result"])
 
-    def test_lens_limit_per_turn(self):
+        # 每轮总量上限：第四个镜头被截断
         agent, _ = self.build([
             Reply(tool_calls=[lens_call(i, key) for i, key in
                               enumerate(("inversion", "first_principles", "systems", "gray"), 1)]),
             Reply(content="四个镜头已经到上限。"),
         ], lenses_per_turn=3)
-        result = agent.ask("复杂问题")
-        self.assertEqual(result["lenses"], ["inversion", "first_principles", "systems"])
+        self.assertEqual(agent.ask("复杂问题")["lenses"],
+                         ["inversion", "first_principles", "systems"])
 
-    def test_lens_state_resets_next_turn(self):
+        # 状态按轮重置：下一轮仍能加载同一个镜头
         agent, _ = self.build([
             Reply(tool_calls=[lens_call(1)]),
             Reply(content="第一轮"),
@@ -113,22 +117,17 @@ class AgentLoopTest(unittest.TestCase):
             Reply(content="第二轮"),
         ], lenses_per_turn=1)
         agent.ask("第一轮问题")
-        result = agent.ask("第二轮问题")
-        self.assertEqual(result["lenses"], ["inversion"])
-
-    def test_streaming_callback(self):
-        agent, _ = self.build([Reply(content="结果 35")])
-        pieces = []
-        agent.on_delta = pieces.append
-        agent.ask("算一下")
-        self.assertEqual("".join(pieces), "结果 35")
+        self.assertEqual(agent.ask("第二轮问题")["lenses"], ["inversion"])
 
     def test_answer_without_tool(self):
         agent, _ = self.build([Reply(content="你好")])
+        pieces = []
+        agent.on_delta = pieces.append
         result = agent.ask("在吗")
         self.assertEqual(result["text"], "你好")
         self.assertEqual(result["steps"], 1)
         self.assertEqual(result["lenses"], [])
+        self.assertEqual("".join(pieces), "你好")
 
     def test_max_steps_guard(self):
         replies = [Reply(tool_calls=[lens_call(i, key)]) for i, key in
@@ -144,10 +143,10 @@ class AgentLoopTest(unittest.TestCase):
 
     def test_system_prompt_carries_catalog(self):
         cfg = make_cfg(self.tmp.name)
-        prompt = config_mod.system_prompt(cfg)
+        prompt = settings_mod.system_prompt(cfg)
         self.assertIn("[元认知]", prompt)
         self.assertIn("inversion 逆向思维", prompt)
-        self.assertNotIn("提问清单：", prompt)
+        self.assertNotIn("提问清单：", prompt)  # 详细清单按需加载，不进固定前缀
 
     def test_state_card_feeds_next_turn(self):
         agent, client = self.build([Reply(content="第一个答案")], state_card_chars=1600)
@@ -240,7 +239,7 @@ class SessionTest(unittest.TestCase):
         agent = Agent(make_cfg(self.tmp.name), llm_client=client,
                       memory_root=self.tmp.name, system_prompt="SYS")
         first_session = agent.memory.session_id
-        self.assertEqual(first_session, memory_mod.DEFAULT_SESSION)
+        self.assertEqual(first_session, DEFAULT_SESSION)
         agent.ask("问题一")
 
         agent.reset()
@@ -249,7 +248,7 @@ class SessionTest(unittest.TestCase):
         self.assertEqual(len(agent.messages), 1)
         agent.ask("问题二")
 
-        agent.memory = memory_mod.Memory(self.tmp.name, first_session)
+        agent.memory = Conversation(self.tmp.name, first_session)
         count = agent.resume()
         self.assertEqual(count, 2)
         self.assertEqual(agent.messages[1]["content"], "问题一")
@@ -262,7 +261,7 @@ class SessionTest(unittest.TestCase):
                           memory_root=self.tmp.name, system_prompt="SYS")
             agent.resume()
             agent.ask(text)
-        rows = memory_mod.list_sessions(self.tmp.name)
+        rows = library.list_sessions(self.tmp.name)
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["turns"], 2)
 
@@ -355,27 +354,26 @@ class StopAndRetryTest(unittest.TestCase):
                       {item["id"] for item in agent.memory.branch_tree()["nodes"]})
         self.assertTrue(messages[-1]["stopped"])
 
-    def test_stop_without_content_discards_node(self):
-        client = StopLLM([Reply(content="")])
-        agent = self.build(client)
+    def test_empty_or_failed_turn_leaves_nothing(self):
+        # 一个 delta 都没有就停止：整轮节点撤销，历史里不留空问答
+        agent = self.build(StopLLM([Reply(content="")]))
         result = agent.ask("这个问题没有任何输出")
-
         self.assertTrue(result["stopped"])
         self.assertEqual(result["text"], "")
         self.assertIsNone(result["node"])
         self.assertEqual(agent.memory.branch_tree()["nodes"], [])
         self.assertEqual(agent.memory.conversation(), [])
 
-    def test_failure_discards_node(self):
+        # 调用抛错同样撤销，不把残缺节点留在树上
         class Boom(ScriptedLLM):
             def chat(self, messages, tools=None, stream=False, on_delta=None,
                      should_stop=None):
                 raise RuntimeError("连接断开")
 
-        agent = self.build(Boom([]))
+        failed = self.build(Boom([]))
         with self.assertRaises(RuntimeError):
-            agent.ask("会失败的问题")
-        self.assertEqual(agent.memory.branch_tree()["nodes"], [])
+            failed.ask("会失败的问题")
+        self.assertEqual(failed.memory.branch_tree()["nodes"], [])
 
     def test_stop_flag_resets_between_turns(self):
         client = StopLLM([Reply(content="前半段内容比较长一些。")])

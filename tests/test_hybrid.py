@@ -4,9 +4,9 @@ import copy
 import tempfile
 import unittest
 
-from mote import config as config_mod
-from mote.agent import Agent
-from mote.llm import Reply
+from mote.core import config as config_mod
+from mote.infra.llm import Reply
+from mote.services.agent import Agent
 
 
 class RecordingLLM:
@@ -65,25 +65,18 @@ class HybridTest(unittest.TestCase):
     def test_local_answer_never_calls_worker(self):
         agent, router, worker = self.build(
             '{"route":"local","answer":"这是本地回答","context":"","tools":[]}', [])
+        router.reasoning = "只是打招呼，走本地直答就够了"
         result = agent.ask("在吗")
         self.assertEqual(result["route"], "local")
         self.assertEqual(result["model"], "qwen-local")
         self.assertEqual(result["worker"], "local")
         self.assertEqual(len(worker.calls), 0)
         self.assertEqual(len(router.calls), 1)
-        event = [e for e in agent.memory.events() if e["t"] == "assistant"][0]
-        self.assertEqual(event["model"], "qwen-local")
-        self.assertEqual(event["route"], "local")
-
-    def test_local_answer_keeps_router_thinking(self):
-        agent, router, worker = self.build(
-            '{"route":"local","answer":"这是本地回答","context":"","tools":[]}', [])
-        router.reasoning = "只是打招呼，走本地直答就够了"
-        result = agent.ask("在吗")
-        self.assertEqual(result["route"], "local")
         # 本地直答没有 worker 调用，思考过程来自路由那次调用
         self.assertEqual(result["thinking"], "只是打招呼，走本地直答就够了")
         event = [e for e in agent.memory.events() if e["t"] == "assistant"][0]
+        self.assertEqual(event["model"], "qwen-local")
+        self.assertEqual(event["route"], "local")
         self.assertEqual(event["thinking"], "只是打招呼，走本地直答就够了")
         self.assertEqual(agent.memory.thinking_for(result["node"]),
                          "只是打招呼，走本地直答就够了")
@@ -111,7 +104,17 @@ class HybridTest(unittest.TestCase):
         self.assertEqual(history[-1]["model"], "deepseek-chat")
         self.assertEqual(history[-1]["route"], "cloud")
 
-    def test_direct_mode_skips_local_router(self):
+    def test_mode_override_picks_path(self):
+        # 单轮指定 hybrid：本地路由器参与，简单问题本地直答
+        agent, router, worker = self.build(
+            '{"route":"local","answer":"先本地处理","context":"","tools":[]}', [])
+        result = agent.ask("在吗", mode="hybrid")
+        self.assertEqual(result["mode"], "hybrid")
+        self.assertEqual(result["route"], "local")
+        self.assertEqual(len(router.calls), 1)
+        self.assertEqual(len(worker.calls), 0)
+
+        # 单轮指定 direct：完全跳过本地路由器
         agent, router, worker = self.build(
             '{"route":"local","answer":"不应出现","context":"","tools":[]}',
             [Reply(content="直接问云端")])
@@ -122,15 +125,6 @@ class HybridTest(unittest.TestCase):
         self.assertEqual(len(router.calls), 0)
         self.assertEqual(len(worker.calls), 1)
 
-    def test_hybrid_mode_uses_local_router(self):
-        agent, router, worker = self.build(
-            '{"route":"local","answer":"先本地处理","context":"","tools":[]}', [])
-        result = agent.ask("在吗", mode="hybrid")
-        self.assertEqual(result["mode"], "hybrid")
-        self.assertEqual(result["route"], "local")
-        self.assertEqual(len(router.calls), 1)
-        self.assertEqual(len(worker.calls), 0)
-
     def test_bad_router_json_falls_back(self):
         agent, _, worker = self.build("模型没有输出 JSON", [Reply(content="兜底回答")])
         result = agent.ask("关键问题")
@@ -139,6 +133,74 @@ class HybridTest(unittest.TestCase):
         self.assertTrue(any("关键问题" in (m.get("content") or "")
                             for m in worker.calls[0]))
         self.assertEqual(len(worker.calls), 1)
+
+
+class LocalOnlyTest(unittest.TestCase):
+    """仅本地：不建路由、不碰云端，回答由本地端点直接产出。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def cfg(self, mode):
+        cfg = copy.deepcopy(config_mod.DEFAULT)
+        cfg["profiles"]["cloud"]["api_key"] = "sk-test"
+        cfg["profiles"]["local"]["base_url"] = "http://127.0.0.1:9/v1"
+        cfg["hybrid"]["mode"] = mode
+        cfg["hybrid"]["enabled"] = mode == "hybrid"
+        cfg["_memory_root"] = self.tmp.name
+        return cfg
+
+    def test_local_mode_never_builds_router(self):
+        local = RecordingLLM([Reply(content="本地算出来的答案")], model="qwen3.5:4b")
+        agent = Agent(self.cfg("local"), llm_client=local, memory_root=self.tmp.name,
+                      system_prompt="SYS")
+        self.assertEqual(agent.default_mode, "local")
+        self.assertIsNone(agent.router)
+        result = agent.ask("一加一")
+        self.assertEqual(result["route"], "local")
+        self.assertEqual(result["mode"], "local")
+        self.assertEqual(result["model"], "qwen3.5:4b")
+        self.assertEqual(result["steps"], 1)
+        self.assertEqual(len(local.calls), 1)
+        self.assertEqual(agent.memory.conversation()[-1]["route"], "local")
+
+    def test_switch_to_local_from_cloud_mode(self):
+        router = Router('{"route":"cloud","answer":"","context":"压缩过的问题","tools":[]}')
+        worker = RecordingLLM([Reply(content="云端回答")])
+        agent = Agent(self.cfg("hybrid"), llm_client=worker, router_client=router,
+                      hybrid={"mode": "hybrid", "enabled": True},
+                      memory_root=self.tmp.name, system_prompt="SYS")
+        local = RecordingLLM([Reply(content="本地回答")], model="qwen3.5:4b")
+        agent._pairs["local"] = (dict(agent._resolve_profile("local"), model="qwen3.5:4b"), local)
+
+        result = agent.ask("这个问题", mode="local")
+        self.assertEqual(result["route"], "local")
+        self.assertEqual(result["model"], "qwen3.5:4b")
+        self.assertEqual(len(local.calls), 1)
+        # 路由与云端一次都没被调用
+        self.assertEqual(worker.calls, [])
+        self.assertEqual(router.calls, [])
+        # 单轮覆盖不外溢：下一轮仍按配置的方式走
+        self.assertEqual(agent.default_mode, "hybrid")
+
+    def test_mode_rules_and_missing_local(self):
+        self.assertEqual(config_mod.mode_of({"mode": "local", "enabled": False}), "local")
+        # 旧字段说不要本地前置时，残留的 mode=hybrid 不能把它改回来
+        self.assertEqual(config_mod.mode_of({"mode": "hybrid", "enabled": False}), "direct")
+        self.assertEqual(config_mod.mode_of({"enabled": False}), "direct")
+        self.assertEqual(config_mod.mode_of({"enabled": True}), "hybrid")
+        self.assertEqual(config_mod.mode_of({}), "direct")
+
+        # 仅本地缺端点必须报错，不能悄悄退回云端
+        cfg = self.cfg("local")
+        del cfg["profiles"]["local"]
+        cfg["default_profile"] = "cloud"
+        with self.assertRaises(config_mod.ConfigError) as ctx:
+            Agent(cfg, memory_root=self.tmp.name, system_prompt="SYS")
+        self.assertIn("local", str(ctx.exception))
 
 
 if __name__ == "__main__":

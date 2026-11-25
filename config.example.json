@@ -51,6 +51,7 @@
     "port": 9000
   },
   "hybrid": {
+    "mode": "hybrid",
     "enabled": true,
     "router_profile": "local",
     "worker_profile": "cloud",

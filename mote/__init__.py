@@ -2,16 +2,12 @@
 
 零第三方依赖（只用标准库），可接本地 Ollama 或任意 OpenAI 兼容云端 API。
 
-模块速查：
-  agent.py    通用 tool loop：本地直答 / 云端压缩执行
-  preprocess.py 本地路由器：一次调用完成路由、压缩、工具预选
-  tools.py    工具注册表：now、use_lens（插件）
-  lenses.py   46 个精选镜头的提问清单与目录（可选插件）
-  llm.py      OpenAI 兼容客户端（urllib + SSE）
-  memory.py   对话记忆：事件流水 + 每轮重建的状态卡
-  context.py  上下文裁剪的纯函数
-  server.py   HTTP 接口
-  web.py      网页界面：双栏会话 + Markdown 渲染
-  cli.py      终端 REPL
-  config.py   配置加载与 profile 切换
+代码按四层组织，依赖只能从上往下：
+
+  interfaces/  接入层：HTTP、网页、终端
+  services/    服务层：会话、问答编排、设置、工具与镜头
+  infra/       基础设施层：配置文件、事件日志、模型客户端
+  core/        纯逻辑层：配置模型、上下文、事件树、导出、路由规则
+
+`__main__.py` 在四层之上，只做参数解析与派发。
 """

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mote · 思维顾问</title>
+<script>{{BOOT}}
+</script>
+<style>
+{{STYLE}}
+</style>
+</head>
+<body>
+<aside id="side">
+ <div class="brand"><div class="logo">M</div><b>Mote</b><button class="icon-btn" id="hide" title="收起侧栏">‹</button></div>
+ <button class="new-chat" id="new"><span>＋</span>新建对话</button>
+ <div class="search"><input id="search" placeholder="搜索对话或聊天内容"></div>
+ <div class="hits" id="hits"></div>
+ <div class="sessions" id="sessions"></div>
+ <div class="side-foot"><span>本地思维顾问 · 对话留在本机</span><button type="button" class="foot-link" id="backup" title="导出全部会话为 JSON">备份</button></div>
+</aside>
+<main>
+ <div class="topbar">
+  <button class="icon-btn" id="toggle" title="展开/收起侧栏">☰</button>
+  <div class="title" id="topTitle">新对话</div>
+  <span class="status" id="status"></span>
+  <button class="top-btn" id="findBtn" title="在当前对话里查找（Ctrl+F）">⌕ 查找</button>
+  <button class="top-btn" id="branchBtn" title="查看当前对话的分支树">⑂ 分支树</button>
+  <button class="top-btn" id="setBtn" title="设置模型与 API Key">⚙ 设置</button>
+  <div class="model" id="model"></div>
+ </div>
+ <div class="findbar" id="findbar">
+  <span class="fhint">只查当前对话 · 打完按 Enter 定位 · ↑↓ 翻看 · Esc 关闭</span>
+  <input id="findInput" type="text" spellcheck="false" placeholder="查找内容，回车定位">
+  <span class="fc" id="findCount">0/0</span>
+  <button type="button" id="findPrev" title="上一处（Shift+Enter）">↑</button>
+  <button type="button" id="findNext" title="下一处（Enter）">↓</button>
+  <button type="button" id="findClose" title="关闭（Esc）">✕</button>
+ </div>
+ <div class="scroll" id="scroll"><div class="thread" id="thread"></div></div>
+ <button class="to-latest" id="toLatest">↓ 跳到最新</button>
+ <div class="composer">
+  <div class="box"><textarea id="q" rows="1" placeholder="给 Mote 发消息…（Enter 发送，Shift+Enter 换行）"></textarea><button class="send" id="send" title="发送">➤</button></div>
+  <div class="hint">
+   <span>回答由模型生成，仅作判断参考，请自行核实</span>
+  </div>
+ </div>
+</main>
+<div class="modal" id="treeModal">
+ <div class="dialog">
+  <div class="head"><b>对话分支树</b><span class="tree-stat" id="treeStat"></span><button type="button" data-close="treeModal">关闭</button></div>
+  <div class="body" id="treeBox"></div>
+  <div class="foot"><div class="tree-legend"><span><i></i>其他分支</span><span><i class="main"></i>主分支</span><span><i class="path"></i>当前分支</span><span><i class="cur"></i>当前位置</span></div>
+   <div class="tree-zoom">
+    <button type="button" id="zoomOut" title="缩小">−</button>
+    <button type="button" class="pct" id="zoomPct" title="恢复 100%">100%</button>
+    <button type="button" id="zoomIn" title="放大">+</button>
+    <button type="button" id="zoomFit" title="缩到一屏能看全宽度">适应宽度</button>
+   </div>
+   <button type="button" data-close="treeModal">完成</button></div>
+ </div>
+</div>
+<div class="modal" id="editModal">
+ <div class="dialog">
+  <div class="head"><b>编辑问题并另开分支</b><button type="button" data-close="editModal">取消</button></div>
+  <div class="body"><textarea class="edit-text" id="editText"></textarea></div>
+  <div class="foot"><button type="button" data-close="editModal">取消</button><button type="button" class="primary" id="editSubmit">发送并分叉</button></div>
+ </div>
+</div>
+<div class="modal" id="setModal">
+ <div class="dialog">
+  <div class="head"><b>设置</b><button type="button" data-close="setModal">关闭</button></div>
+  <div class="body">
+   <div class="set-group">
+    <div class="set-title">外观</div>
+    <div class="set-sub">白天或黑夜配色，点一下立即生效，只影响本机这个浏览器。</div>
+    <div class="set-pick" id="setTheme">
+     <button type="button" data-theme="light"><b>☀ 白天</b><small>浅色底、深色字，适合白天或明亮的房间。</small></button>
+     <button type="button" data-theme="dark"><b>☾ 黑夜</b><small>深色底、浅色字，夜里看不刺眼。</small></button>
+    </div>
+   </div>
+   <div class="set-group">
+    <div class="set-title">问答方式</div>
+    <div class="set-sub">每条消息怎么走：本地先看一遍再决定要不要云端，直接交给云端，还是完全不出本机。</div>
+    <div class="set-pick stack" id="setMode">
+     <button type="button" data-mode="hybrid"><b>本地处理 → API</b><small>本地模型先判断难易、压缩上下文，简单问题不调用云端；复杂的才交给云端。</small></button>
+     <button type="button" data-mode="direct"><b>直接云端</b><small>跳过本地处理，每条消息都直接调用云端模型。最快，但每次都联网。</small></button>
+     <button type="button" data-mode="local"><b>仅本地</b><small>只用本机模型回答，一个字节都不发出去。适合离线，或想看看本地模型自己能答到什么程度。</small></button>
+    </div>
+    <p class="set-warn" id="setModeWarn"></p>
+   </div>
+   <div class="set-group">
+    <div class="set-title">云端模型 · 负责回答</div>
+    <div class="set-sub">填任意 OpenAI 兼容接口：DeepSeek、通义、Kimi、OpenRouter 都可以。</div>
+    <div class="set-row"><label for="setCloudUrl">接口地址</label><input id="setCloudUrl" type="text" spellcheck="false" placeholder="https://api.deepseek.com/v1"></div>
+    <div class="set-row"><label for="setCloudModel">模型名</label><input id="setCloudModel" type="text" spellcheck="false" placeholder="deepseek-chat"></div>
+    <div class="set-row"><label for="setCloudKey">API Key</label><input id="setCloudKey" type="password" spellcheck="false" autocomplete="off" placeholder="sk-…"></div>
+    <label class="set-check"><input type="checkbox" id="setCloudThink"><span>显示思考过程<small>请求里开启 thinking；关掉更快更省，但回答上方不会有「思考过程」。</small></span></label>
+   </div>
+   <div class="set-group">
+    <div class="set-title">本地模型 · 负责路由与压缩</div>
+    <div class="set-sub">需要本机 Ollama（或兼容端点）；没有的话把上面的问答方式改成「直接云端」。</div>
+    <div class="set-row"><label for="setLocalUrl">接口地址</label><input id="setLocalUrl" type="text" spellcheck="false" placeholder="http://localhost:11434/v1"></div>
+    <div class="set-row"><label for="setLocalModel">模型名</label><input id="setLocalModel" type="text" spellcheck="false" placeholder="qwen3.5:4b"></div>
+   </div>
+   <p class="set-hint" id="setHint"></p>
+  </div>
+  <div class="foot"><span id="setTest"></span><button type="button" id="setTestBtn">测试连接</button><button type="button" class="primary" id="setSave">保存</button></div>
+ </div>
+</div>
+<div id="note"></div>
+<script>
+{{APP}}
+</script>
+</body>
+</html>

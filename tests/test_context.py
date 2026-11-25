@@ -3,7 +3,7 @@
 import json
 import unittest
 
-from mote import context
+from mote.core import context
 
 
 def assistant(content="", calls=None):
@@ -18,7 +18,7 @@ def assistant(content="", calls=None):
 
 
 class SplitTurnsTest(unittest.TestCase):
-    def test_prefix_and_turns(self):
+    def test_prefix_and_orphan_tool(self):
         messages = [
             {"role": "system", "content": "S"},
             {"role": "user", "content": "U1"},
@@ -31,13 +31,12 @@ class SplitTurnsTest(unittest.TestCase):
         self.assertEqual(len(turns), 2)
         self.assertEqual(len(turns[0][1]), 1)  # 第一轮带一条 tool
 
-    def test_leading_tool_goes_to_prefix(self):
         # 孤立的 tool 消息（前面没有 assistant）落在 prefix 里，压缩时会被整体丢掉，
         # 这正是我们要的结果：它本来就不该出现，更不能被裁进保留轮。
-        messages = [{"role": "system", "content": "S"},
-                    {"role": "tool", "content": "orphan"},
-                    assistant("A")]
-        prefix, turns = context.split_turns(messages)
+        orphan = [{"role": "system", "content": "S"},
+                  {"role": "tool", "content": "orphan"},
+                  assistant("A")]
+        prefix, turns = context.split_turns(orphan)
         self.assertEqual([m["content"] for m in prefix], ["S", "orphan"])
         self.assertEqual(len(turns), 1)
         self.assertEqual(turns[0][1], [])
@@ -60,17 +59,21 @@ class KeepValuableTurnsTest(unittest.TestCase):
         # 顺序必须保持原样，否则 assistant 与它的 tool 会错位
         self.assertLess(contents.index("r1"), contents.index("r4"))
 
-    def test_no_turn_returns_empty(self):
+        # 没有完整轮次时返回空
         self.assertEqual(context.keep_valuable_turns([{"role": "user", "content": "U"}]), [])
 
 
 class TrimTest(unittest.TestCase):
-    def test_long_tool_output_clipped_with_marker(self):
+    def test_long_outputs_are_clipped(self):
         messages = [{"role": "tool", "content": "x" * 500}]
         trimmed = context.trim_tool_outputs(messages, 100)
         self.assertLess(len(trimmed[0]["content"]), 220)
         self.assertIn("截断", trimmed[0]["content"])
         self.assertTrue(trimmed[0]["content"].startswith("xxx"))
+
+        # 短消息原样返回，连对象都不重建
+        short = [{"role": "user", "content": "hi"}]
+        self.assertIs(context.trim_tool_outputs(short, 100)[0], short[0])
 
     def test_long_arguments_stay_valid_json(self):
         raw = json.dumps({"expression": "1+" * 200})
@@ -81,10 +84,6 @@ class TrimTest(unittest.TestCase):
         self.assertTrue(parsed["_truncated"])
         self.assertEqual(parsed["_original_chars"], len(raw))
         self.assertTrue(raw.startswith(parsed["head"]))
-
-    def test_small_messages_untouched(self):
-        messages = [{"role": "user", "content": "hi"}]
-        self.assertIs(context.trim_tool_outputs(messages, 100)[0], messages[0])
 
 
 class ContextCharsTest(unittest.TestCase):
@@ -99,19 +98,17 @@ class ContextCharsTest(unittest.TestCase):
 
 
 class NoticeTest(unittest.TestCase):
-    def test_thought_notice_order_and_truncation(self):
+    def test_order_and_truncation(self):
         thoughts = [{"turn": 1, "text": "a" * 50}, {"turn": 2, "text": "b" * 10}]
         text = context.thought_notice(thoughts, per_thought_chars=20)
         self.assertIn("[轮 1]", text)
         self.assertIn("截断", text)
         self.assertLess(text.index("[轮 1]"), text.index("[轮 2]"))
-
-    def test_empty(self):
         self.assertEqual(context.thought_notice([]), "")
 
 
 class SummarizeTest(unittest.TestCase):
-    def test_summary_contains_question_and_answer(self):
+    def test_content_and_limit(self):
         text = context.summarize([
             {"role": "user", "content": "3+4 等于几"},
             {"role": "assistant", "content": "等于 7"},
@@ -119,10 +116,8 @@ class SummarizeTest(unittest.TestCase):
         self.assertIn("3+4", text)
         self.assertIn("等于 7", text)
 
-    def test_summary_truncated(self):
-        text = context.summarize(
-            [{"role": "user", "content": "问" * 500}], max_chars=50)
-        self.assertLessEqual(len(text), 51)
+        clipped = context.summarize([{"role": "user", "content": "问" * 500}], max_chars=50)
+        self.assertLessEqual(len(clipped), 51)
 
 
 if __name__ == "__main__":

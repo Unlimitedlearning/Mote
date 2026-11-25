@@ -4,9 +4,11 @@ import argparse
 import json
 import sys
 
-from . import config as config_mod
-from . import memory as memory_mod
-from .agent import Agent
+from .core import config as config_mod
+from .infra import config_file
+from .services import library
+from .services.agent import Agent
+from .services.conversation import Conversation
 
 
 def build_parser():
@@ -15,6 +17,8 @@ def build_parser():
     parser.add_argument("--profile", help="端点名")
     parser.add_argument("--no-hybrid", action="store_true",
                         help="关闭本地前置，直接调用默认 profile")
+    parser.add_argument("--local", action="store_true",
+                        help="只用本地端点回答，不调用云端")
     sub = parser.add_subparsers(dest="cmd")
 
     for name, text in (("chat", "进入对话（默认行为）"), ("ask", "一次性提问")):
@@ -54,8 +58,10 @@ def main(argv=None):
     raw = list(sys.argv[1:] if argv is None else argv)
     # 这两个开关允许写在子命令前面（python -m mote --no-browser serve）
     no_hybrid = "--no-hybrid" in raw
+    local_only = "--local" in raw
     no_browser = "--no-browser" in raw
-    raw = [item for item in raw if item not in ("--no-hybrid", "--no-browser")]
+    raw = [item for item in raw
+           if item not in ("--no-hybrid", "--local", "--no-browser")]
     if raw and raw[0] in ("-h", "--help"):
         build_parser().print_help()
         return 0
@@ -64,26 +70,29 @@ def main(argv=None):
 
     args = build_parser().parse_args(raw)
     args.no_hybrid = no_hybrid
+    args.local = local_only
     args.no_browser = no_browser
     try:
-        cfg = config_mod.load(args.config)
+        cfg = config_file.load(args.config)
     except config_mod.ConfigError as err:
         print(f"配置错误：{err}", file=sys.stderr)
         return 2
-    if no_hybrid:
-        cfg.setdefault("hybrid", {})["enabled"] = False
+    if no_hybrid or local_only:
+        hybrid = cfg.setdefault("hybrid", {})
+        hybrid["mode"] = "local" if local_only else "direct"
+        hybrid["enabled"] = False
     cfg["_memory_root"] = root = config_mod.memory_root(cfg)
 
     if args.cmd == "sessions":
-        from .cli import _print_sessions
+        from .interfaces.cli import _print_sessions
         _print_sessions(root)
         return 0
     if args.cmd == "tools":
-        from . import tools as tools_mod
+        from .services import tools as tools_mod
         print(json.dumps(tools_mod.specs(), ensure_ascii=False, indent=2))
         return 0
     if args.cmd == "lenses":
-        from . import lenses as lenses_mod
+        from .services import lenses as lenses_mod
         if args.id:
             text = lenses_mod.detail(args.id)
             if text is None:
@@ -101,19 +110,19 @@ def main(argv=None):
                   f"--all 看提问清单，--id <id> 看单个。")
         return 0
     if args.cmd == "serve":
-        from .server import serve
+        from .interfaces.http.server import serve
         srv = config_mod.server_cfg(cfg)
         host = args.host if args.host is not None else srv.get("host", "127.0.0.1")
         port = args.port if args.port is not None else int(srv.get("port", 9000))
         serve(cfg, host, port, args.verbose, open_browser=not args.no_browser)
         return 0
     if args.cmd == "state":
-        rows = memory_mod.list_sessions(root)
+        rows = library.list_sessions(root)
         session = args.session or (rows[0]["id"] if rows else None)
         if not session:
             print("磁盘上还没有会话。")
             return 1
-        memory = memory_mod.Memory(root, session)
+        memory = Conversation(root, session)
         print(f"会话 {session}  {memory.home}")
         print("─" * 60)
         print(memory.state_card(int(config_mod.agent_cfg(cfg).get("state_card_chars", 1600))))
@@ -122,7 +131,7 @@ def main(argv=None):
             print(memory.digest(args.log))
         return 0
 
-    from .cli import Renderer, ask_once, chat as chat_loop
+    from .interfaces.cli import Renderer, ask_once, chat as chat_loop
     try:
         agent = Agent(cfg, profile_name=args.profile, session_id=args.session)
     except config_mod.ConfigError as err:

@@ -3,10 +3,11 @@
 import os
 import sys
 
-from . import config as config_mod
-from . import lenses as lenses_mod
-from . import memory as memory_mod
-from .llm import LLMError
+from ..core import config as config_mod
+from ..infra.llm import LLMError
+from ..services import lenses as lenses_mod
+from ..services import library
+from ..services.conversation import Conversation
 
 HELP = """\
 命令：
@@ -76,13 +77,18 @@ class Renderer:
             print(p.cyan(f"  ⚙ 已切到 {payload['profile']} · {payload['model']}"))
 
 
+def _mode_label(agent):
+    return {"hybrid": "本地路由", "local": "仅本地"}.get(
+        getattr(agent, "default_mode", "direct"), "直连")
+
+
 def banner(agent, paint):
     p, rule = paint, "─" * 56
     print("\n".join([
         p.dim(rule),
         f"  {p.bold('Mote')} · 通用 agent（工具可插拔，本地前置省钱）",
-        p.dim(f"  模型 {agent.profile['model']}  [{'本地路由' if agent.hybrid_enabled else '直连'}]   "
-              f"会话 {agent.memory.session_id}"),
+        p.dim(f"  模型 {agent.profile['model']}  "
+              f"[{_mode_label(agent)}]   会话 {agent.memory.session_id}"),
         p.dim(f"  已启用工具 {len(agent.tool_names)} 个：{'、'.join(agent.tool_names)}"),
         p.dim(rule),
         p.dim("  /help 看命令；网页界面：python -m mote serve"),
@@ -91,7 +97,7 @@ def banner(agent, paint):
 
 def _print_sessions(root, current_id=None, paint=None):
     paint = paint or Paint()
-    rows = memory_mod.list_sessions(root)
+    rows = library.list_sessions(root)
     if not rows:
         print(paint.dim("  磁盘上还没有历史会话"))
     for index, row in enumerate(rows, 1):
@@ -142,13 +148,13 @@ def handle_command(agent, line):
             print(paint.yellow("  用法：/resume <id|序号>"))
             _print_sessions(agent.memory_root, agent.memory.session_id, paint)
             return True
-        rows = memory_mod.list_sessions(agent.memory_root)
+        rows = library.list_sessions(agent.memory_root)
         target = rows[int(arg) - 1]["id"] if arg.isdigit() and 1 <= int(arg) <= len(rows) else \
             (arg if any(row["id"] == arg for row in rows) else None)
         if not target:
             print(paint.red(f"  找不到会话 {arg}"))
             return True
-        agent.memory = memory_mod.Memory(agent.memory_root, target)
+        agent.memory = Conversation(agent.memory_root, target)
         print(paint.green(f"  已接上 {target}：重建 {agent.resume()} 条消息"))
     elif cmd == "model":
         if arg:
@@ -160,7 +166,7 @@ def handle_command(agent, line):
             print(f"  当前 {paint.bold(agent.profile['name'])} · {agent.profile['model']}")
             print(paint.dim(f"  可切换：{', '.join(agent.cfg.get('profiles') or {})}"))
     elif cmd == "tools":
-        from . import tools as tools_mod
+        from ..services import tools as tools_mod
         for item in tools_mod.REGISTRY.values():
             print(f"  {paint.cyan(item['name'])}  {_clip(item['description'], 100)}")
     else:

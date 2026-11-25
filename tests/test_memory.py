@@ -5,38 +5,43 @@ import tempfile
 import unittest
 import unittest.mock
 
-from mote import memory as memory_mod
+from mote.core.ids import DEFAULT_SESSION, new_session_id
+from mote.infra import store as store_mod
+from mote.services import conversation as conversation_mod
+from mote.services import library
+from mote.services.conversation import Conversation
 
 
 class MemoryTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.memory = memory_mod.Memory(self.tmp.name, "s-test")
+        self.memory = Conversation(self.tmp.name, "s-test")
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def test_events_append_only(self):
+    def test_append_only_and_counts(self):
+        # session 事件只写一次，后续 ensure 不重复
+        self.memory.ensure(profile="local", model="m")
+        self.memory.ensure(profile="local", model="m")
+
         self.memory.user(1, "现在几点")
         self.memory.assistant(1, "十点整")
-        self.assertEqual([e["t"] for e in self.memory.events()], ["user", "assistant"])
-        # 再写一条不能让前两条消失
-        self.memory.user(2, "明天呢")
-        self.assertEqual(len(self.memory.events()), 3)
-
-    def test_ensure_writes_session_event_only_once(self):
-        self.memory.ensure(profile="local", model="m")
-        self.memory.ensure(profile="local", model="m")
-        kinds = [e["t"] for e in self.memory.events()]
-        self.assertEqual(kinds.count("session"), 1)
-
-    def test_turns_count(self):
-        self.memory.user(1, "a")
         self.memory.tool(1, "now", "{}", "2026-11-22 ...")
-        self.memory.user(2, "b")
+        # 再写一条不能让前几条消失
+        self.memory.user(2, "明天呢")
+
+        kinds = [e["t"] for e in self.memory.events()]
+        self.assertEqual(kinds[0], "session")
+        self.assertEqual(kinds.count("session"), 1)
+        self.assertEqual(kinds[1:], ["user", "assistant", "tool", "user"])
         self.assertEqual(self.memory.turns(), 2)
 
-    def test_state_card_rebuilds_from_events(self):
+    def test_state_card_variants(self):
+        # 空会话
+        self.assertIn("新会话", self.memory.state_card())
+
+        # 从事件重建：轮次、工具结果、上次回答
         self.memory.user(1, "现在几点")
         self.memory.tool(1, "now", "{}", "2026-11-22 10:09:52 星期日")
         self.memory.assistant(1, "现在是十点零九分")
@@ -45,37 +50,34 @@ class MemoryTest(unittest.TestCase):
         self.assertIn("10:09:52", card)
         self.assertIn("上次回答要点", card)
 
-    def test_state_card_empty(self):
-        self.assertIn("新会话", self.memory.state_card())
-
-    def test_state_card_truncated(self):
-        for i in range(1, 30):
-            self.memory.user(i, "问题" * 200)
-        card = self.memory.state_card(max_chars=300)
-        self.assertLessEqual(len(card), 300)
-        self.assertIn("截断", card)
-
-    def test_state_card_shows_compaction_summary(self):
-        self.memory.user(1, "早前的问题")
+        # 压缩摘要进状态卡
         self.memory.compact(3, 9000, 2000, 5, "问「早前的问题」；答「早前的答案」")
         card = self.memory.state_card()
         self.assertIn("已归档", card)
         self.assertIn("早前的答案", card)
 
-    def test_tool_failure_is_marked(self):
+        # 超长时按上限截断并留提示
+        for i in range(2, 30):
+            self.memory.user(i, "问题" * 200)
+        clipped = self.memory.state_card(max_chars=300)
+        self.assertLessEqual(len(clipped), 300)
+        self.assertIn("截断", clipped)
+
+    def test_tool_thoughts_and_digest(self):
+        self.memory.user(1, "问题")
+        self.memory.assistant(1, "回答")
         self.memory.tool(1, "now", "{}", "参数不匹配", ok=False)
         self.assertIn("失败", self.memory.state_card())
 
-    def test_thoughts_skip_empty_and_keep_order(self):
+        # 空思考不落盘，顺序保持
         self.memory.note_think(1, "先确认时区")
         self.memory.note_think(1, "   ")
+        self.memory.user(2, "下一个问题")
         self.memory.note_think(2, "再换算星期")
         notes = self.memory.thoughts(3)
         self.assertEqual([n["text"] for n in notes], ["先确认时区", "再换算星期"])
 
-    def test_digest_marks_compaction(self):
-        self.memory.user(1, "问题")
-        self.memory.assistant(1, "回答")
+        # /log 里压缩单独成段
         self.memory.compact(2, 100, 20, 3, "摘要内容")
         text = self.memory.digest()
         self.assertIn("轮 1", text)
@@ -105,62 +107,61 @@ class SessionDirTest(unittest.TestCase):
 
     def test_default_session_is_shared(self):
         with tempfile.TemporaryDirectory() as tmp:
-            first = memory_mod.Memory(tmp)
-            second = memory_mod.Memory(tmp)
-            self.assertEqual(first.session_id, memory_mod.DEFAULT_SESSION)
+            first = Conversation(tmp)
+            second = Conversation(tmp)
+            self.assertEqual(first.session_id, DEFAULT_SESSION)
             self.assertEqual(first.session_id, second.session_id)
 
             first.user(1, "第一次")
             second.user(2, "第二次")
-            rows = memory_mod.list_sessions(tmp)
+            rows = library.list_sessions(tmp)
             self.assertEqual(len(rows), 1)          # 只有一个目录
             self.assertEqual(rows[0]["turns"], 2)   # 两次都在里面
 
-    def test_session_has_only_two_files(self):
+    def test_session_layout_and_ids(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory = memory_mod.Memory(tmp)
+            memory = Conversation(tmp)
             memory.ensure(profile="local", model="m")
             memory.user(1, "你好")
             memory.assistant(1, "你好")
             memory.note_think(1, "想一下")
-            names = sorted(os.listdir(memory.home))
-            self.assertEqual(names, ["events.jsonl", "thoughts.jsonl"])
-
-    def test_new_session_id_is_unique(self):
-        self.assertNotEqual(memory_mod.new_session_id(), memory_mod.new_session_id())
+            # 一个会话目录只有这两个日志，没有别的临时文件
+            self.assertEqual(sorted(os.listdir(memory.home)),
+                             ["events.jsonl", "thoughts.jsonl"])
+        self.assertNotEqual(new_session_id(), new_session_id())
 
 
 class SessionListTest(unittest.TestCase):
     def test_list_sessions_newest_first(self):
         with tempfile.TemporaryDirectory() as tmp:
-            first = memory_mod.Memory(tmp, "s-1")
-            second = memory_mod.Memory(tmp, "s-2")
+            first = Conversation(tmp, "s-1")
+            second = Conversation(tmp, "s-2")
             with unittest.mock.patch.object(
-                    memory_mod, "_now",
+                    conversation_mod, "_now",
                     side_effect=["2026-01-02T09:00:00", "2026-02-03T09:00:00"]):
                 first.user(1, "第一个会话")
                 second.user(1, "第二个会话")
-            rows = memory_mod.list_sessions(tmp)
+            rows = library.list_sessions(tmp)
             self.assertEqual([r["id"] for r in rows], ["s-2", "s-1"])
             self.assertEqual(rows[0]["preview"], "第二个会话")
 
     def test_date_follows_last_question_not_log_mtime(self):
         """切分支、重命名都会追加事件；日期只认最后一次提问，不能被这些操作顶到最新。"""
         with tempfile.TemporaryDirectory() as tmp:
-            memory = memory_mod.Memory(tmp, "s-date")
-            with unittest.mock.patch.object(memory_mod, "_now",
+            memory = Conversation(tmp, "s-date")
+            with unittest.mock.patch.object(conversation_mod, "_now",
                                             return_value="2026-03-05T10:00:00"):
                 memory.user(1, "老问题", node="n-1")
             memory.set_cursor("n-1")
             memory.rename("改个名字")
             os.utime(memory.events_path, (2_000_000_000, 2_000_000_000))
-            row = memory_mod.list_sessions(tmp)[0]
+            row = library.list_sessions(tmp)[0]
             self.assertEqual(row["date"], "2026-03-05T10:00:00")
 
-            with unittest.mock.patch.object(memory_mod, "_now",
+            with unittest.mock.patch.object(conversation_mod, "_now",
                                             return_value="2026-04-06T11:22:33"):
                 memory.user(2, "新问题", node="n-2", parent="n-1")
-            self.assertEqual(memory_mod.list_sessions(tmp)[0]["date"],
+            self.assertEqual(library.list_sessions(tmp)[0]["date"],
                              "2026-04-06T11:22:33")
 
 
@@ -169,7 +170,7 @@ class ConversationTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.memory = memory_mod.Memory(self.tmp.name, "s-web")
+        self.memory = Conversation(self.tmp.name, "s-web")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -187,17 +188,15 @@ class ConversationTest(unittest.TestCase):
             ("user", "问题一"), ("assistant", "**结论**：先做小实验。"), ("user", "问题二")])
         self.assertEqual(rows[1]["lenses"], ["inversion", "first_principles"])
 
-    def test_rename_adds_event_without_new_file(self):
-        self.memory.user(1, "问题")
-        self.memory.rename("新标题")
-        row = memory_mod.list_sessions(self.tmp.name)[0]
-        self.assertEqual(row["title"], "新标题")
-        self.assertEqual(sorted(os.listdir(self.memory.home)), ["events.jsonl"])
-
-    def test_list_sessions_exposes_title(self):
+    def test_title_prefers_rename_over_first_question(self):
         self.memory.user(1, "该不该现在换工作")
-        row = memory_mod.list_sessions(self.tmp.name)[0]
-        self.assertEqual(row["title"], "该不该现在换工作")
+        self.assertEqual(library.list_sessions(self.tmp.name)[0]["title"],
+                         "该不该现在换工作")
+
+        # 重命名只追加事件，不另建文件
+        self.memory.rename("新标题")
+        self.assertEqual(library.list_sessions(self.tmp.name)[0]["title"], "新标题")
+        self.assertEqual(sorted(os.listdir(self.memory.home)), ["events.jsonl"])
 
 
     def test_thinking_survives_conversation_rebuild(self):
@@ -214,7 +213,7 @@ class BranchTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.memory = memory_mod.Memory(self.tmp.name, "s-branch")
+        self.memory = Conversation(self.tmp.name, "s-branch")
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -227,7 +226,7 @@ class BranchTest(unittest.TestCase):
         self.memory.user(3, "问题 C", node="n3", parent="n1")
         self.memory.assistant(3, "回答 C", node="n3")
 
-    def test_branch_tree_keeps_siblings(self):
+    def test_branch_tree_and_cursor_view(self):
         self._seed()
         tree = self.memory.branch_tree()
         self.assertEqual({n["id"] for n in tree["nodes"]}, {"n1", "n2", "n3"})
@@ -235,8 +234,7 @@ class BranchTest(unittest.TestCase):
         self.assertEqual(by_id["n1"]["children"], ["n2", "n3"])
         self.assertEqual(tree["active"], "n3")
 
-    def test_conversation_follows_cursor_branch(self):
-        self._seed()
+        # 切到兄弟分支后，视图只保留该链路
         self.memory.set_cursor("n2")
         rows = self.memory.conversation()
         self.assertEqual([r["text"] for r in rows],
@@ -244,29 +242,24 @@ class BranchTest(unittest.TestCase):
         self.assertEqual(rows[-1]["node"], "n2")
         self.assertNotIn("问题 C", [r["text"] for r in rows])
 
-    def test_main_branch_wins_over_cursor_on_reopen(self):
+    def test_main_branch_pins_and_clears(self):
         self._seed()
         self.memory.set_cursor("n3")
         self.assertEqual(self.memory.active_node(), "n3")
         self.memory.set_main("n2")
         # 主分支优先：即便游标停在 C，打开会话仍落在 B 链路
         self.assertEqual(self.memory.active_node(), "n2")
-        reopened = memory_mod.Memory(self.memory.root, self.memory.session_id)
+        reopened = Conversation(self.memory.root, self.memory.session_id)
         self.assertEqual(reopened.active_node(), "n2")
         self.assertEqual([r["text"] for r in reopened.conversation()][-1], "回答 B")
         # 之后又在别处切换分支（写新游标），主分支依然生效
         reopened.set_cursor("n3")
         self.assertEqual(reopened.active_node(), "n2")
+        # 取消后回到游标所指的分支
+        reopened.set_main(None)
+        self.assertEqual(reopened.active_node(), "n3")
 
-    def test_main_branch_can_be_cleared(self):
-        self._seed()
-        self.memory.set_main("n2")
-        self.memory.set_cursor("n3")
-        self.assertEqual(self.memory.active_node(), "n2")
-        self.memory.set_main(None)
-        self.assertEqual(self.memory.active_node(), "n3")
-
-    def test_main_branch_dropped_when_node_deleted(self):
+    def test_main_branch_drops_on_delete_and_moves_with_turn(self):
         self._seed()
         self.memory.set_main("n3")
         self.assertEqual(self.memory.branch_tree()["main"], "n3")
@@ -275,6 +268,15 @@ class BranchTest(unittest.TestCase):
         self.assertEqual(self.memory.active_node(), "n2")
         # 已删除的节点不能再被设为主分支
         self.assertIsNone(self.memory.set_main("n3"))
+
+        # 在主分支末端续问，主分支跟着前移
+        self.memory.set_main("n2")
+        self.memory.user(4, "接着问", node="n4", parent="n2")
+        self.memory.assistant(4, "答四", node="n4")
+        self.assertEqual(self.memory.main_node(), "n4")
+        # 从分叉点另起的提问不算主分支的延续
+        self.memory.user(5, "分叉问", node="n5", parent="n1")
+        self.assertEqual(self.memory.main_node(), "n4")
 
     def test_branch_view_can_follow_any_chain(self):
         self._seed()
@@ -309,27 +311,27 @@ class BranchTest(unittest.TestCase):
         self.assertNotIn("main", self.memory.export_markdown())
         self.assertEqual(self.memory.branch_tree()["main"], "n2")
 
-    def test_delete_node_removes_subtree_from_context(self):
+    def test_delete_subtree_is_append_only(self):
         self._seed()
         self.memory.user(4, "问题 D", node="n4", parent="n3")
         self.memory.assistant(4, "回答 D", node="n4")
+        before = len(self.memory.events())
+        old = self.memory.events()
         removed = self.memory.delete_node("n3")
         self.assertEqual(set(removed), {"n3", "n4"})
+
+        # 历史前缀一字不改，只追加 delete + 游标回退
+        events = self.memory.events()
+        self.assertEqual(events[:before], old)
+        self.assertEqual(events[before]["t"], "delete")
+        self.assertEqual(events[-1]["t"], "cursor")
+
         # 删掉当前分支后回退到剩下的兄弟分支，而不是停在分叉点
         self.assertEqual(self.memory.active_node(), "n2")
         self.assertNotIn("问题 C", self.memory.state_card())
         self.assertNotIn("问题 D", self.memory.state_card())
         tree = self.memory.branch_tree()
         self.assertEqual({n["id"] for n in tree["nodes"]}, {"n1", "n2"})
-
-    def test_delete_is_append_only(self):
-        self._seed()
-        before = len(self.memory.events())
-        self.memory.delete_node("n2")
-        events = self.memory.events()
-        self.assertEqual([e["t"] for e in events[before:]], ["delete"])
-        self.assertEqual([e["t"] for e in events[:before]],
-                         [e["t"] for e in events[:before]])
 
     def test_delete_only_current_branch_keeps_siblings(self):
         self.memory.user(1, "问题 A", node="n1", parent=None)
@@ -401,7 +403,7 @@ class ExportTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.memory = memory_mod.Memory(self.tmp.name, "s-export")
+        self.memory = Conversation(self.tmp.name, "s-export")
         self.memory.ensure(profile="local", model="deepseek-chat")
         self.memory.rename("换工作判断")
         self.memory.user(1, "该不该换工作\n第二行", node="n1", parent=None)
@@ -426,10 +428,10 @@ class ExportTest(unittest.TestCase):
         self.assertIn("思考过程（4 字）", text)
         self.assertIn("`s-export`", text)
 
-    def test_markdown_can_skip_thinking(self):
-        text = self.memory.export_markdown(with_thinking=False)
-        self.assertNotIn("思考过程", text)
-        self.assertNotIn("先拆约束", text)
+        # 导出时可以不带思考过程
+        plain = self.memory.export_markdown(with_thinking=False)
+        self.assertNotIn("思考过程", plain)
+        self.assertNotIn("先拆约束", plain)
 
     def test_payload_carries_all_branches(self):
         self.memory.user(3, "怎么找隐患（改）", node="n3", parent="n1")
@@ -448,11 +450,9 @@ class ExportTest(unittest.TestCase):
         self.assertNotIn("另一条回答。", [m.get("text") for m in payload["messages"]])
         self.assertIn("另一条回答。", payload["branches"]["n3"]["answer"])
 
-    def test_filename_is_safe(self):
+    def test_filename_and_thinking_lookup(self):
         self.memory.rename('a/b:c "d"')
         self.assertEqual(self.memory.export_filename("md"), "a-b-c-d.md")
-
-    def test_thinking_for_node(self):
         self.assertEqual(self.memory.thinking_for("n1"), "先拆约束")
         self.assertEqual(self.memory.thinking_for("n2"), "")
         self.assertEqual(self.memory.thinking_for("nope"), "")
@@ -463,10 +463,10 @@ class SearchTest(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.first = memory_mod.Memory(self.tmp.name, "s-a")
+        self.first = Conversation(self.tmp.name, "s-a")
         self.first.user(1, "工作太累", node="n1", parent=None)
         self.first.assistant(1, "先看约束再决定。", node="n1")
-        self.second = memory_mod.Memory(self.tmp.name, "s-b")
+        self.second = Conversation(self.tmp.name, "s-b")
         self.second.user(1, "阳台光照不够", node="n1", parent=None)
         self.second.assistant(1, "下午搬到西边。", node="n1")
 
@@ -474,7 +474,7 @@ class SearchTest(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_only_matching_session_is_returned(self):
-        data = memory_mod.search_sessions(self.tmp.name, "约束")
+        data = library.search_sessions(self.tmp.name, "约束")
         self.assertEqual(data["total"], 1)
         hit = data["results"][0]
         self.assertEqual((hit["session"], hit["role"], hit["node"]), ("s-a", "assistant", "n1"))
@@ -482,21 +482,20 @@ class SearchTest(unittest.TestCase):
         self.assertEqual(hit["title"], "工作太累")
 
     def test_all_terms_must_match(self):
-        self.assertEqual(memory_mod.search_sessions(self.tmp.name, "约束 决定")["total"], 1)
-        self.assertEqual(memory_mod.search_sessions(self.tmp.name, "约束 光照")["total"], 0)
+        self.assertEqual(library.search_sessions(self.tmp.name, "约束 决定")["total"], 1)
+        self.assertEqual(library.search_sessions(self.tmp.name, "约束 光照")["total"], 0)
 
     def test_deleted_node_disappears_from_search(self):
         self.first.delete_node("n1")
-        self.assertEqual(memory_mod.search_sessions(self.tmp.name, "工作")["total"], 0)
+        self.assertEqual(library.search_sessions(self.tmp.name, "工作")["total"], 0)
 
-    def test_empty_query_returns_nothing(self):
-        self.assertEqual(memory_mod.search_sessions(self.tmp.name, "  ")["results"], [])
+    def test_empty_query_and_limit(self):
+        self.assertEqual(library.search_sessions(self.tmp.name, "  ")["results"], [])
 
-    def test_limit_is_respected(self):
         for index in range(2, 10):
             self.first.user(index, "重复的约束问题 %d" % index,
                             node="n%d" % index, parent="n1")
-        data = memory_mod.search_sessions(self.tmp.name, "约束", limit=3)
+        data = library.search_sessions(self.tmp.name, "约束", limit=3)
         self.assertEqual(len(data["results"]), 3)
         self.assertGreater(data["total"], 3)
 
@@ -506,45 +505,44 @@ class SessionListCacheTest(unittest.TestCase):
 
     def test_reuses_cache_until_log_changes(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory = memory_mod.Memory(tmp, "s-cache")
+            memory = Conversation(tmp, "s-cache")
             memory.user(1, "第一条")
-            first = memory_mod.list_sessions(tmp)
+            first = library.list_sessions(tmp)
             self.assertEqual(first[0]["turns"], 1)
 
             with unittest.mock.patch.object(
-                    memory_mod.Memory, "events",
+                    Conversation, "events",
                     side_effect=AssertionError("不应重新读取事件日志")):
-                second = memory_mod.list_sessions(tmp)
+                second = library.list_sessions(tmp)
             self.assertEqual(second, first)
 
             memory.user(2, "第二条")
-            self.assertEqual(memory_mod.list_sessions(tmp)[0]["turns"], 2)
+            self.assertEqual(library.list_sessions(tmp)[0]["turns"], 2)
 
-    def test_different_roots_do_not_share_rows(self):
+    def test_roots_are_isolated_and_rows_copied(self):
         with tempfile.TemporaryDirectory() as one, tempfile.TemporaryDirectory() as two:
-            memory_mod.Memory(one, "s-a").user(1, "甲")
-            memory_mod.Memory(two, "s-b").user(1, "乙")
-            self.assertEqual(memory_mod.list_sessions(one)[0]["title"], "甲")
-            self.assertEqual(memory_mod.list_sessions(two)[0]["title"], "乙")
+            Conversation(one, "s-a").user(1, "甲")
+            Conversation(two, "s-b").user(1, "乙")
+            self.assertEqual(library.list_sessions(one)[0]["title"], "甲")
+            self.assertEqual(library.list_sessions(two)[0]["title"], "乙")
 
-    def test_cache_rows_are_copies(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory_mod.Memory(tmp, "s-copy").user(1, "标题")
-            rows = memory_mod.list_sessions(tmp)
-            rows[0]["title"] = "被改掉"
-            self.assertEqual(memory_mod.list_sessions(tmp)[0]["title"], "标题")
+            Conversation(tmp, "s-copy").user(1, "标题")
+            rows = library.list_sessions(tmp)
+            rows[0]["title"] = "被改掉"   # 缓存里的行必须是副本，不能被调用方改坏
+            self.assertEqual(library.list_sessions(tmp)[0]["title"], "标题")
 
     def test_index_survives_process_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
-            memory_mod.Memory(tmp, "s-index").user(1, "持久标题")
-            memory_mod.list_sessions(tmp)
+            Conversation(tmp, "s-index").user(1, "持久标题")
+            library.list_sessions(tmp)
             self.assertTrue(os.path.exists(os.path.join(tmp, "session_index.json")))
-            memory_mod._LIST_CACHE.clear()
-            memory_mod._INDEX_CACHE.clear()
+            library._LIST_CACHE.clear()
+            store_mod._INDEX_CACHE.clear()
             with unittest.mock.patch.object(
-                    memory_mod.Memory, "events",
+                    Conversation, "events",
                     side_effect=AssertionError("索引命中时不应读日志")):
-                rows = memory_mod.list_sessions(tmp)
+                rows = library.list_sessions(tmp)
             self.assertEqual(rows[0]["title"], "持久标题")
             self.assertEqual(rows[0]["turns"], 1)
 

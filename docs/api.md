@@ -24,13 +24,14 @@
 
 | 路径 | 作用 |
 |---|---|
-| `POST /inbox` | `{"message":"...","session":"...","parent":"..."?,"fork":"..."?,"mode":"hybrid\|direct"?}` |
+| `POST /inbox` | `{"message":"...","session":"...","parent":"..."?,"fork":"..."?,"mode":"hybrid\|direct\|local"?}` |
 | `POST /inbox/stream` | 同上，走 SSE |
 
 - `parent`：把新问题接在该节点之后，成为它的子节点。
 - `fork`：新问题与该节点**同级**（编辑后另开分支），原分支保持不变。
-- `mode`：`hybrid` 先由本地 qwen 处理，再决定是否调云端；`direct` 跳过本地处理直连 worker。
-  缺省沿用 `hybrid.enabled`（网页的面板改的就是这个全局值）。
+- `mode`：`hybrid` 先由本地 qwen 处理，再决定是否调云端；`direct` 跳过本地处理直连 worker；
+  `local` 只用本地端点回答，不发任何云端请求。缺省沿用配置里的 `hybrid.mode`
+  （网页设置面板改的就是这个全局值）。
 
 SSE 事件：
 
@@ -80,7 +81,8 @@ python -m mote lenses --all             # 全部 46 个的完整清单
 python -m mote tools                    # 已注册工具
 ```
 
-全局参数 `--no-hybrid` 可放在任意子命令前，关闭本地前置走 legacy 直连。
+全局参数 `--no-hybrid`（走直连）与 `--local`（只用本地）可放在任意子命令前，
+只覆盖本次运行，不会写回配置文件。
 
 REPL 斜杠命令：
 

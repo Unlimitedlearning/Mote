@@ -11,9 +11,12 @@ import urllib.parse
 import urllib.request
 from http.server import ThreadingHTTPServer
 
-from mote import config as config_mod
-from mote import memory as memory_mod
-from mote import server as server_mod
+from mote.core import config as config_mod
+from mote.core.ids import DEFAULT_SESSION, new_node_id
+from mote.infra import config_file
+from mote.services import settings as settings_mod
+from mote.services.conversation import Conversation
+from mote.interfaces import http as server_mod
 
 
 class FakeAgent:
@@ -22,11 +25,11 @@ class FakeAgent:
         self.sid = session_id
 
     def ask(self, text, stream=False, parent=None, mode=None, fork=None):
-        memory = memory_mod.Memory(self.root, self.sid)
+        memory = Conversation(self.root, self.sid)
         if fork:
             parent = memory.parent_of(fork)
         parent = parent or memory.active_node()
-        node = memory_mod.new_node_id()
+        node = new_node_id()
         memory.user(1, text, node=node, parent=parent)
         memory.tool(1, "use_lens", '{"lens":"inversion"}', "清单")
         memory.assistant(1, "**结论**：先做小实验。", model="fake-cloud", route="cloud",
@@ -67,7 +70,7 @@ class FakeManager:
         self.guard = threading.Lock()
 
     def get(self, session_id=None):
-        key = session_id or memory_mod.DEFAULT_SESSION
+        key = session_id or DEFAULT_SESSION
         if key not in self.agents:
             self.agents[key] = FakeAgent(self.root, key)
             self.locks[key] = threading.Lock()
@@ -111,13 +114,39 @@ class ServerTest(unittest.TestCase):
         with urllib.request.urlopen(self.base + path, timeout=5) as r:
             return r.status, dict(r.headers), r.read().decode("utf-8")
 
-    def test_page_has_two_panes_and_markdown_renderer(self):
+    def test_page_covers_ui_features(self):
+        """页面是内联的单文件：这里守住「功能入口都还在」这条底线。"""
         with urllib.request.urlopen(self.base + "/", timeout=5) as r:
             page = r.read().decode("utf-8")
-        for token in ('id="sessions"', 'id="thread"', 'id="toLatest"',
-                      'id="status"', 'data-act="rename"', 'data-act="delete"',
-                      '思考中', "'云端 · '", "'本地 · '", 'function md(', 'class="copy"'):
-            self.assertIn(token, page)
+        tokens = [
+            # 双栏、Markdown、复制、状态标签
+            'id="sessions"', 'id="thread"', 'id="toLatest"', 'id="status"',
+            'data-act="rename"', 'data-act="delete"', '思考中',
+            "'云端 · '", "'本地 · '", 'function md(', 'class="copy"',
+            # 流式输出与思考折叠
+            '/inbox/stream', "d.className='think'", 'function paintPending()',
+            # 分支树、消息菜单、生成控制
+            'id="branchBtn"', 'id="treeModal"', 'id="editModal"',
+            'class="msg-more"', 'data-act="edit"', 'function renderTree(',
+            'async function deleteTurn(', '⚙ 设置', 'id="setMode"',
+            'data-mode="hybrid"', 'data-mode="direct"', 'function branchNavFor(',
+            'function stopGenerating(', 'function regenerate(', 'function retryLast(',
+            "'ans-tools'", 'AbortController', 'data-act="main"', 'function setMain(',
+            'id="note"',
+            # 设置面板
+            'id="setBtn"', 'id="setModal"', 'function openSettings(',
+            "fetch('/settings'", 'id="setCloudKey"', 'id="setTestBtn"',
+            # 分支树由 JS 算坐标后画 SVG
+            'class="tm-edge', 'class="tm-node', 'state.treePos',
+            # 检索与导出
+            'id="hits"', 'function runSearch(', 'function renderHits(',
+            'function openHit(', 'data-act="export-md"', 'data-act="export-json"',
+            'id="backup"', "'/search?q='", 'function download(', "'load-more'",
+            'function revealNode(', '/thinking/',
+        ]
+        for token in tokens:
+            with self.subTest(token=token):
+                self.assertIn(token, page)
 
     def test_create_session_then_read_history(self):
         _, created = self._post("/sessions", {})
@@ -198,15 +227,6 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(events["thinking"][0]["delta"], "先看约束")
         self.assertEqual(events["done"][0]["thinking"], "先看约束")
         self.assertIsNone(agent.on_delta)
-
-    def test_page_has_stream_and_thinking_toggle(self):
-        req = urllib.request.Request(self.base + "/")
-        with urllib.request.urlopen(req, timeout=5) as r:
-            page = r.read().decode("utf-8")
-        self.assertIn("/inbox/stream", page)
-        self.assertIn("d.className='think'", page)
-        self.assertIn("function paintPending()", page)
-
 
     def test_branch_tree_edit_switch_and_delete(self):
         _, created = self._post("/sessions", {})
@@ -351,27 +371,6 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn("问题二", texts)
         self.assertEqual(active["tree"]["active"], forked["node"])
 
-    def test_page_has_branch_tree_and_message_menu(self):
-        with urllib.request.urlopen(self.base + "/", timeout=5) as r:
-            page = r.read().decode("utf-8")
-        for token in ('id="branchBtn"', 'id="treeModal"', 'id="editModal"',
-                      'class="msg-more"', 'data-act="edit"',
-                      'data-act="delete"', 'function renderTree(', 'async function deleteTurn(',
-                      # 问答方式已从输入框移进设置面板，入口按钮带文字避免被忽略
-                      '⚙ 设置', 'id="setMode"', 'data-mode="hybrid"', 'data-mode="direct"',
-                      'function branchNavFor(', 'function stopGenerating(',
-                      'function regenerate(', 'function retryLast(',
-                      "'ans-tools'", 'AbortController',
-                      'data-act="main"', 'function setMain(', 'id="note"',
-                      # 设置面板：右上角入口、弹窗、读写接口
-                      'id="setBtn"', 'id="setModal"', 'function openSettings(',
-                      "fetch('/settings'", 'id="setCloudKey"', 'id="setTestBtn"',
-                      # 分支树改成 JS 算坐标后画 SVG，不再用伪元素拼连线
-                      'class="tm-edge', 'class="tm-node', 'state.treePos'):
-            self.assertIn(token, page)
-
-
-
     def test_stop_endpoint_sets_flag_without_lock(self):
         class StoppableAgent:
             sid = "stop-session"
@@ -460,16 +459,6 @@ class ServerTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as bad:
             self._get("/search?q=")
         self.assertEqual(bad.exception.code, 400)
-
-    def test_page_has_search_hits_and_export_menu(self):
-        with urllib.request.urlopen(self.base + "/", timeout=5) as r:
-            page = r.read().decode("utf-8")
-        for token in ('id="hits"', 'function runSearch(', 'function renderHits(',
-                      'function openHit(', 'data-act="export-md"',
-                      'data-act="export-json"', 'id="backup"', "'/search?q='",
-                      'function download(', "'load-more'", 'function revealNode(',
-                      '/thinking/'):
-            self.assertIn(token, page)
 
     def test_messages_defer_thinking_to_lazy_endpoint(self):
         _, created = self._post("/sessions", {})
@@ -595,9 +584,34 @@ class SettingsTest(unittest.TestCase):
         cfg["_config_path"] = self.config_path
         self.assertEqual(config_mod.config_target(cfg), self.config_path)
 
+    def test_mode_local_persists_and_needs_no_cloud_key(self):
+        _, data = self._get("/settings")
+        self.assertEqual(data["hybrid"]["mode"], "hybrid")
+
+        _, saved = self._post("/settings", {"hybrid": {"mode": "local"}})
+        self.assertTrue(saved["ok"])
+        raw = self._config_file()
+        self.assertEqual(raw["hybrid"]["mode"], "local")
+        # 旧字段跟着同步，两份表示不会互相矛盾
+        self.assertFalse(raw["hybrid"]["enabled"])
+        self.assertEqual(self._get("/settings")[1]["hybrid"]["mode"], "local")
+        # 只用本地不碰云端，首次打开不该再弹设置面板
+        self.assertFalse(settings_mod.needs_setup(self.httpd.cfg))
+
+    def test_legacy_enabled_syncs_mode(self):
+        self._post("/settings", {"hybrid": {"enabled": False}})
+        raw = self._config_file()
+        self.assertFalse(raw["hybrid"]["enabled"])
+        self.assertEqual(raw["hybrid"]["mode"], "direct")
+
+    def test_mode_rejects_unknown_value(self):
+        code, body = self._post("/settings", {"hybrid": {"mode": "offline"}}, expect=400)
+        self.assertIn("hybrid", body["error"])
+        self.assertFalse(os.path.exists(self.config_path))
+
     def test_update_keeps_unrelated_sections(self):
-        config_mod.update(self.config_path, {"profiles": {"cloud": {"model": "m1"}}})
-        config_mod.update(self.config_path, {"hybrid": {"enabled": False}})
+        config_file.update(self.config_path, {"profiles": {"cloud": {"model": "m1"}}})
+        config_file.update(self.config_path, {"hybrid": {"enabled": False}})
         raw = self._config_file()
         self.assertEqual(raw["profiles"]["cloud"]["model"], "m1")
         self.assertFalse(raw["hybrid"]["enabled"])

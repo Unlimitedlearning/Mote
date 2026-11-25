@@ -9,7 +9,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from mote import llm as llm_mod
+from mote.infra import llm as llm_mod
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -120,7 +120,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertTrue(seen["payload"]["stream"])
         self.assertEqual(seen["payload"]["tools"][0]["function"]["name"], "now")
 
-    def test_stream_reports_thinking_delta(self):
+        # 思考分片单独回调，与正文分开累计
         thoughts = []
         self.client().chat([{"role": "user", "content": "算"}],
                            stream=True, on_thinking=thoughts.append)
@@ -132,7 +132,7 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(reply.tool_calls[0]["id"], "c9")
         self.assertEqual(reply.usage["prompt_tokens"], 3)
 
-    def test_message_round_trip_shape(self):
+    def test_message_shapes(self):
         reply = llm_mod.Reply(content="", tool_calls=[{"id": "c1", "name": "now",
                                                       "arguments": "{}"}],
                               reasoning="不该回传的思考")
@@ -143,6 +143,12 @@ class LLMClientTest(unittest.TestCase):
         self.assertNotIn("reasoning", msg)
         self.assertNotIn("reasoning_content", msg)  # 长期历史不带思考，省 token
         json.dumps(msg)  # 必须可直接序列化回传
+
+        # 只在发回同一轮工具调用时带上思考，且为空时不塞空字段
+        with_reasoning = reply.message(with_reasoning=True)
+        self.assertEqual(with_reasoning["reasoning_content"], "不该回传的思考")
+        self.assertNotIn("reasoning_content",
+                         llm_mod.Reply(content="x").message(with_reasoning=True))
 
     def test_thinking_flag_only_when_profile_asks(self):
         plain = self.client()
@@ -156,24 +162,15 @@ class LLMClientTest(unittest.TestCase):
         self.assertEqual(self.httpd.seen[-1]["payload"]["thinking"],
                          {"type": "enabled"})
 
-    def test_message_carries_reasoning_inside_tool_turn(self):
-        reply = llm_mod.Reply(content="", tool_calls=[{"id": "c1", "name": "now",
-                                                      "arguments": "{}"}],
-                              reasoning="先看当前时间")
-        msg = reply.message(with_reasoning=True)
-        self.assertEqual(msg["reasoning_content"], "先看当前时间")
-        # 思考内容为空时不该塞一个空字段
-        self.assertNotIn("reasoning_content", llm_mod.Reply(content="x").message(with_reasoning=True))
-
-    def test_http_error_is_terminal(self):
+    def test_errors_are_wrapped(self):
+        # 4xx 不重试，直接上报
         with self.assertRaises(llm_mod.LLMError):
             self.client(path="/v1/bad").chat([{"role": "user", "content": "算"}])
-
-    def test_connection_error_wrapped(self):
-        client = llm_mod.LLM(base_url="http://127.0.0.1:9/v1", model="x",
-                             retries=0, timeout=1)
+        # 连不上也要包成同一种异常，调用方只处理一种错误
+        offline = llm_mod.LLM(base_url="http://127.0.0.1:9/v1", model="x",
+                              retries=0, timeout=1)
         with self.assertRaises(llm_mod.LLMError):
-            client.chat([{"role": "user", "content": "算"}])
+            offline.chat([{"role": "user", "content": "算"}])
 
 
 if __name__ == "__main__":

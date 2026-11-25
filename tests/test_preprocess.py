@@ -3,9 +3,9 @@
 import copy
 import unittest
 
-from mote import config as config_mod
-from mote import preprocess
-from mote.llm import Reply
+from mote.core import config as config_mod
+from mote.core import router as preprocess
+from mote.infra.llm import Reply
 
 
 class StubRouter:
@@ -47,31 +47,31 @@ class PreprocessTest(unittest.TestCase):
         self.assertLessEqual(len(result["context"]), 40)
         self.assertIn("当前问题", result["context"])
 
-    def test_bad_json_falls_back(self):
-        router = StubRouter("我没有输出 JSON")
-        result = preprocess.prepare(self.cfg, "关键问题", "历史", router,
+    def test_bad_output_falls_back(self):
+        # 模型没吐 JSON：按规则回退，上下文里仍要带上当前问题
+        broken = preprocess.prepare(self.cfg, "关键问题", "历史", StubRouter("我没有输出 JSON"),
                                     allowed=["now"], limit=100)
-        self.assertEqual(result["route"], "cloud")
-        self.assertTrue(result["fallback"])
-        self.assertIn("关键问题", result["context"])
+        self.assertEqual(broken["route"], "cloud")
+        self.assertTrue(broken["fallback"])
+        self.assertIn("关键问题", broken["context"])
 
-    def test_router_exception_falls_back(self):
-        result = preprocess.prepare(self.cfg, "关键问题", "历史",
+        # 模型直接抛错：同样回退，不能把主链路带崩
+        failed = preprocess.prepare(self.cfg, "关键问题", "历史",
                                     BrokenRouter(""), allowed=["now"], limit=100)
-        self.assertEqual(result["route"], "cloud")
-        self.assertTrue(result["fallback"])
-
-    def test_fallback_detects_time_question(self):
-        result = preprocess.prepare(self.cfg, "现在几点", "历史", None,
-                                    allowed=["now", "use_lens"], limit=100)
-        self.assertEqual(result["tools"], ["now"])
+        self.assertEqual(failed["route"], "cloud")
+        self.assertTrue(failed["fallback"])
 
     def test_no_router_uses_rules(self):
-        result = preprocess.prepare(self.cfg, "关键问题", "历史", None,
-                                    allowed=["now"], limit=100)
-        self.assertEqual(result["route"], "cloud")
-        self.assertTrue(result["fallback"])
-        self.assertIn("关键问题", result["context"])
+        ordinary = preprocess.prepare(self.cfg, "关键问题", "历史", None,
+                                      allowed=["now"], limit=100)
+        self.assertEqual(ordinary["route"], "cloud")
+        self.assertTrue(ordinary["fallback"])
+        self.assertIn("关键问题", ordinary["context"])
+
+        # 规则层能识别时间类问题，自动预选 now
+        timed = preprocess.prepare(self.cfg, "现在几点", "历史", None,
+                                   allowed=["now", "use_lens"], limit=100)
+        self.assertEqual(timed["tools"], ["now"])
 
 
 if __name__ == "__main__":
