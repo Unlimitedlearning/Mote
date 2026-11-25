@@ -97,5 +97,14 @@ class LensToolTest(unittest.TestCase):
                     self.assertIn(hint, result["text"])
 
 
+class EnabledWhitelistTest(unittest.TestCase):
+    def test_empty_whitelist_means_no_tools(self):
+        # 显式写 [] 是「一个都不要」，不能退化成全开
+        self.assertEqual(tools.enabled({"agent": {"tools": []}}), [])
+        self.assertEqual(tools.enabled({"agent": {"tools": ["now"]}}), ["now"])
+        # 连键都没有才算「没配过」，此时用全部已注册工具
+        self.assertTrue(tools.enabled({"agent": {}}))
+
+
 if __name__ == "__main__":
     unittest.main()

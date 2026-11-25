@@ -81,6 +81,8 @@ class RoutesMixin:
         cfg["_memory_root"] = (self.server.cfg.get("_memory_root")
                                or config_mod.memory_root(cfg))
         self.server.cfg = cfg
+        # manager 自己握着 cfg 的引用：不一起换掉，设置保存后新建的 Agent 仍读旧配置
+        self.server.manager.cfg = cfg
         self.server.manager.reset()
         library.forget_cache()
         return ""
@@ -247,6 +249,9 @@ class RoutesMixin:
         data = self._body()
         if data is None:
             return self._json(400, {"error": "body 必须是 JSON"})
+        if not isinstance(data, dict):
+            # JSON 数组或字符串也能解析成功，但后续都按对象取值，先挡住
+            return self._json(400, {"error": "body 必须是 JSON 对象"})
 
         if path in ("/settings", "/settings/test"):
             if not self._local_only():

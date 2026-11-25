@@ -48,23 +48,36 @@ def profile_info(cfg, name=None):
         return None
 
 
-def needs_setup(cfg):
-    """还没配好端点：当前方式要云端却没有 key，首次打开就该把设置面板弹出来。"""
-    hybrid = cfg.get("hybrid") or {}
-    if mode(cfg) == "local":
-        # 只用本地时不碰云端，只要 local 端点还在就不需要 key
-        try:
-            profile(cfg, hybrid.get("router_profile") or "local")
-        except ConfigError:
-            return True
-        return False
+def _usable(cfg, name=None):
+    """这个端点能不能直接用：存在、字段齐全，且本机端点不要求 key。"""
     try:
-        item = profile(cfg)
+        item = profile(cfg, name)
     except ConfigError:
-        return True
+        return False
     base_url = str(item.get("base_url") or "")
     local = "localhost" in base_url or "127.0.0.1" in base_url or "::1" in base_url
-    return not local and not (item.get("api_key") or "").strip()
+    return local or bool((item.get("api_key") or "").strip())
+
+
+def needs_setup(cfg):
+    """还没配好端点：首次打开就该把设置面板弹出来。
+
+    要按**当前方式实际会用的端点**判断。hybrid 回答的是 worker_profile，
+    只看 default_profile 会在 worker 缺 key 时误判成「配好了」，
+    用户于是每问一句都拿到一条生成失败。
+    """
+    hybrid = cfg.get("hybrid") or {}
+    current = mode(cfg)
+    if current == "local":
+        # 只用本地时不碰云端，只要 local 端点还在就不需要 key
+        return not _usable(cfg, hybrid.get("router_profile") or "local")
+    if current == "hybrid":
+        # worker 缺 key 时还能退回 fallback_worker（通常是本地），两边都不可用才算没配好
+        names = [hybrid.get("worker_profile") or "cloud"]
+        if hybrid.get("fallback_worker"):
+            names.append(hybrid["fallback_worker"])
+        return not any(_usable(cfg, name) for name in names)
+    return not _usable(cfg)
 
 
 def system_prompt(cfg):

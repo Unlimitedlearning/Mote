@@ -35,6 +35,18 @@ class _Handler(BaseHTTPRequestHandler):
         if "/bad" in self.path:
             return self._send(400, '{"error":"bad request"}')
 
+        if "/cut" in self.path:
+            # 发一段正文后直接断开、不发终止块：模拟网络中途断掉
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.end_headers()
+            body = ('data: {"choices":[{"delta":{"content":"前半段"}}]}\n\n').encode("utf-8")
+            self.wfile.write(("%X\r\n" % len(body)).encode() + body + b"\r\n")
+            self.wfile.flush()
+            self.close_connection = True
+            return
+
         if not payload.get("stream"):
             return self._send(200, json.dumps({
                 "choices": [{"message": {"role": "assistant", "content": "非流式回答",
@@ -89,6 +101,13 @@ class LLMClientTest(unittest.TestCase):
                                    should_stop=lambda: len(seen) >= 1)
         self.assertEqual(seen, ["合计"])
         self.assertEqual(reply.content, "合计")
+
+    def test_stream_cut_keeps_partial_text(self):
+        """读到一半断线：已生成的正文要留下并标记，不能整轮丢掉。"""
+        reply = self.client(path="/v1/cut").chat(
+            [{"role": "user", "content": "x"}], stream=True)
+        self.assertEqual(reply.content, "前半段")
+        self.assertTrue(reply.interrupted)
 
     def test_endpoint_normalisation(self):
         self.assertEqual(llm_mod.endpoint("http://localhost:11434/v1"),

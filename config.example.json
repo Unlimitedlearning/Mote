@@ -39,6 +39,7 @@
     "compact_thought_chars": 1200,
     "state_card_chars": 1600,
     "resume_messages": 8,
+    "recent_chars": 6000,
     "system_prompt": "prompts/system.md",
     "memory_dir": "memory",
     "tools": [

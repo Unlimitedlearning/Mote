@@ -120,5 +120,39 @@ class SummarizeTest(unittest.TestCase):
         self.assertLessEqual(len(clipped), 51)
 
 
+class FitTailTest(unittest.TestCase):
+    """hybrid 每轮要带上的近几轮原文：这是「把刚才那段改成异步」能成立的前提。"""
+
+    def test_recent_turns_fit_the_budget(self):
+        messages = [{"role": "user", "content": "问" * 60},
+                    {"role": "assistant", "content": "答" * 60},
+                    {"role": "user", "content": "追问" * 80}]
+        picked = context.fit_tail(messages, 400)
+        self.assertEqual(picked[0]["role"], "user")
+        # 预算的四分之一是单条上限，超长那条中间省略
+        self.assertLessEqual(len(picked[-1]["content"]), 100)
+        self.assertIn("截断", picked[-1]["content"])
+        self.assertLessEqual(sum(len(item["content"]) for item in picked), 400)
+        # 原文必须逐字保留在开头，不能只剩摘要
+        self.assertTrue(picked[0]["content"].startswith("问问"))
+
+    def test_drops_leading_assistant_and_handles_empty(self):
+        messages = [{"role": "assistant", "content": "答"},
+                    {"role": "user", "content": "问"}]
+        self.assertEqual([item["role"] for item in context.fit_tail(messages, 100)],
+                         ["user"])
+        self.assertEqual(context.fit_tail(messages, 0), [])
+        self.assertEqual(context.fit_tail([], 100), [])
+
+    def test_never_exceeds_the_budget(self):
+        messages = [{"role": "user", "content": "旧" * 200},
+                    {"role": "assistant", "content": "旧答" * 200},
+                    {"role": "user", "content": "新问题"}]
+        picked = context.fit_tail(messages, 40)
+        self.assertLessEqual(sum(len(item["content"]) for item in picked), 40)
+        self.assertEqual(picked[0]["role"], "user")
+        self.assertEqual(picked[-1]["content"], "新问题")
+
+
 if __name__ == "__main__":
     unittest.main()

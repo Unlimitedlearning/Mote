@@ -119,6 +119,18 @@ class AgentLoopTest(unittest.TestCase):
         agent.ask("第一轮问题")
         self.assertEqual(agent.ask("第二轮问题")["lenses"], ["inversion"])
 
+    def test_interrupted_stream_keeps_partial_answer(self):
+        """连接中途断掉：已经流出去的内容要落进历史，而不是整轮消失。"""
+        agent, _ = self.build([Reply(content="只写了一半", interrupted=True)])
+        result = agent.ask("会断开的问题")
+        self.assertTrue(result["interrupted"])
+        self.assertTrue(result["stopped"])
+        self.assertEqual(result["text"], "只写了一半")
+        rows = agent.memory.conversation()
+        self.assertEqual(rows[-1]["text"], "只写了一半")
+        event = [e for e in agent.memory.events() if e["t"] == "assistant"][-1]
+        self.assertTrue(event["stopped"])
+
     def test_answer_without_tool(self):
         agent, _ = self.build([Reply(content="你好")])
         pieces = []

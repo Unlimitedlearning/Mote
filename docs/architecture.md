@@ -9,13 +9,13 @@ Mote 的目标是用最小的自建框架，把「本地小模型做前置、云
 你发一个问题
   └→ 本地 qwen 一次调用，输出 JSON：route / context / tools
        ├─ route=local  → 本地直接回答，云端 0 token
-       └─ route=cloud  → 只把压缩上下文 + 选中的工具给云端
+       └─ route=cloud  → 压缩上下文 + 最近几轮原文 + 选中的工具给云端
                            └→ 云端按需调工具，再给最终回答
 ```
 
 | 路径 | 触发条件 | 送给模型的内容 |
 |---|---|---|
-| **hybrid**（默认） | `hybrid.mode = hybrid` | 路由器压出的短上下文 + 工具 schema |
+| **hybrid**（默认） | `hybrid.mode = hybrid` | 压缩上下文 + 近几轮原文 + 工具 schema |
 | **legacy（直连）** | 测试注入假模型、`--no-hybrid`、`mode=direct` | 完整历史 + 稳定 system 前缀 + 尾部状态卡 |
 | **local（仅本地）** | `hybrid.mode = local`、`--local` | 完整历史 + 尾部状态卡，只发本机端点 |
 | **本地直答** | 路由器判定 `route=local` | 只有状态卡，不触碰云端 |
@@ -37,7 +37,9 @@ Mote 的目标是用最小的自建框架，把「本地小模型做前置、云
 `mote/core/router.py` 用一次本地调用同时完成：
 
 1. **路由**：判断这个问题要不要上云。问候、事实、时间类问题本地直答。
-2. **压缩**：把状态卡和历史压成 `hybrid.context_chars` 以内的短上下文。
+2. **压缩**：把状态卡和历史压成 `hybrid.context_chars` 以内的背景摘要。
+   它只负责「更早的事」，最近几轮由 `context.fit_tail` 用原文补上——
+   只给 700 字的梗概时，「把刚才那段改成异步」里的「刚才那段」在请求里根本不存在。
 3. **工具预选**：从白名单里挑出这一轮可能用到的工具，云端不再盲选。
 
 输出预算是 `hybrid.router_max_tokens`（默认 2048）。4B 模型的推理会先吃掉一部分 token，
@@ -63,6 +65,22 @@ worker。也就是说路由器挂掉只会退化成"普通对话"，不会让整
 
 本地直答不经过 worker，它的「思考过程」就是路由那次调用的推理（Ollama 的 `reasoning` 字段）。
 工具轮里 assistant 的 `reasoning_content` 只在本轮回传，长期历史里会丢掉，避免白付 token。
+
+## hybrid 请求的构成
+
+云端每轮收到的消息顺序是固定的：
+
+```
+[system] 稳定前缀（系统提示词 + 镜头目录）
+[system] [压缩上下文] …   ← 路由器压出的背景，上限 hybrid.context_chars
+[user]   …              ← 近几轮原文，来自 context.fit_tail
+[assistant] …
+[user]   当前问题
+```
+
+`fit_tail` 按 `agent.resume_messages` 取条数、`agent.recent_chars` 卡总字数，单条按总额度的
+四分之一截断，超长内容中间省略。两条通道分工：压缩背景保证长程连贯，原文保证「刚才」不失真。
+两者都不含工具调用细节。
 
 ## 上下文裁剪
 

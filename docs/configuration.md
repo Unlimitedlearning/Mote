@@ -43,14 +43,15 @@ export MOTE_NO_BROWSER=1            # serve 时不自动开浏览器
 
 | 字段 | 默认 | 含义 |
 |---|---|---|
-| `tools` | `["now","use_lens"]` | 启用的工具白名单 |
+| `tools` | `["now","use_lens"]` | 启用的工具白名单；写 `[]` 表示不启用任何工具 |
 | `lenses_per_turn` | `5` | 单轮加载思维镜头上限 |
 | `max_steps` | `12` | 单轮最多工具调用步数 |
 | `state_card_chars` | `1600` | 状态卡长度，也是路由器看到的历史长度 |
 | `system_prompt` | `prompts/system.md` | 系统提示文件 |
 | `memory_dir` | `memory` | 事件日志目录 |
 | `default_session` | `main` | CLI 默认会话 id |
-| `resume_messages` | `8` | CLI `--resume` 回填的消息数 |
+| `resume_messages` | `8` | 回到历史时回填的消息条数；hybrid 也用它取「近几轮原文」 |
+| `recent_chars` | `6000` | 这些原文的总字数上限，单条按四分之一截断 |
 | `compact_context_chars` | `24000` | legacy 上下文压缩阈值 |
 | `compact_keep_turns` / `compact_keep_tool_turns` | `2` / `3` | 压缩时保留的完整问答 / 工具轮数 |
 | `compact_keep_msg_chars` | `3000` | 单条保留消息的字数上限 |
@@ -65,7 +66,7 @@ export MOTE_NO_BROWSER=1            # serve 时不自动开浏览器
 | `router_profile` | `local` | 本地路由器端点；`mode=local` 时也是唯一的回答端点 |
 | `worker_profile` | `cloud` | 复杂请求交给谁（`hybrid` / `direct` 用） |
 | `fallback_worker` | `local` | 云端 key 缺失时回退到谁 |
-| `context_chars` | `700` | 喂给云端的压缩上下文上限 |
+| `context_chars` | `700` | 喂给云端的压缩上下文上限（不是整个上下文的预算） |
 | `router_max_tokens` | `2048` | 路由器 JSON 预算（512 不够，4B 推理会吃光） |
 | `local_answer_max_tokens` | `2048` | `mode=local` 时的回答预算 |
 

@@ -84,6 +84,41 @@ def trim_tool_outputs(messages, limit):
     return out
 
 
+def fit_tail(messages, limit):
+    """取尾部原文：总字数不超过 limit，单条按总额度的四分之一截断。
+
+    hybrid 路径里压缩上下文只负责「更早的事」，最近几轮必须给原文，
+    否则「把刚才那段改成异步」里的「刚才那段」在请求里根本不存在。
+    入口若落在 assistant 上就丢掉——历史从用户的问题开始。
+    """
+    limit = int(limit or 0)
+    if limit <= 0:
+        return []
+    per_message = max(1, limit // 4)
+    picked, used = [], 0
+    for msg in reversed(list(messages or [])):
+        content = msg.get("content")
+        text = content if isinstance(content, str) else str(content or "")
+        if len(text) > per_message:
+            # 中间省略：保留头尾，比只留开头更容易认出「那段代码」；
+            # 标记本身也算在额度里，保证单条不超四分之一
+            marker = "…（截断）…"
+            keep = max(0, per_message - len(marker))
+            head = keep * 2 // 3
+            text = text[:head] + marker + text[-(keep - head):] if keep else marker
+        cost = len(text)
+        if picked and used + cost > limit:
+            break
+        picked.append(dict(msg, content=text))
+        used += cost
+        if used >= limit:
+            break
+    picked.reverse()
+    while picked and picked[0].get("role") != "user":
+        picked = picked[1:]
+    return picked
+
+
 def context_chars(messages):
     total = 0
     for msg in messages:

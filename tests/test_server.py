@@ -559,12 +559,42 @@ class SettingsTest(unittest.TestCase):
         self.assertEqual(self.httpd.cfg["default_profile"], "cloud")
         self.assertEqual(len(self.httpd.manager.agents), 0)
 
+    def test_saved_config_reaches_new_agents(self):
+        """保存后新建的 Agent 必须用新配置，否则用户填了 key 依然报错。"""
+        self._post("/settings", {"profiles": {"cloud": {"model": "model-new"}}})
+        self.assertIs(self.httpd.manager.cfg, self.httpd.cfg)
+        self.assertEqual(self.httpd.manager.cfg["profiles"]["cloud"]["model"], "model-new")
+        agent = self.httpd.manager.get("probe")
+        self.assertEqual(agent.profile["model"], "model-new")
+
+    def test_needs_setup_follows_the_profile_hybrid_actually_uses(self):
+        cfg = copy.deepcopy(config_mod.DEFAULT)
+        cfg["default_profile"] = "local"
+        cfg["profiles"]["cloud"]["api_key"] = ""     # hybrid 回答用的是 cloud
+        cfg["profiles"]["local"]["api_key"] = "ollama"
+        cfg["hybrid"]["fallback_worker"] = ""        # 先去掉本地兜底
+        self.assertEqual(settings_mod.mode(cfg), "hybrid")
+        self.assertTrue(settings_mod.needs_setup(cfg))
+        # 有本地兜底时还能跑，不该逼着用户填 key
+        cfg["hybrid"]["fallback_worker"] = "local"
+        self.assertFalse(settings_mod.needs_setup(cfg))
+
     def test_blank_key_keeps_saved_one(self):
         self._post("/settings", {"profiles": {"cloud": {"api_key": "sk-keep-me-1"}}})
         self._post("/settings", {"profiles": {"cloud": {"model": "m2", "api_key": "   "}}})
         raw = self._config_file()
         self.assertEqual(raw["profiles"]["cloud"]["api_key"], "sk-keep-me-1")
         self.assertEqual(raw["profiles"]["cloud"]["model"], "m2")
+
+    def test_non_object_body_is_rejected(self):
+        """JSON 数组能解析成 Python 列表，但后续都按对象取值，必须挡在 400 而不是 500。"""
+        req = urllib.request.Request(
+            self.base + "/settings", data=b"[]",
+            headers={"Content-Type": "application/json"}, method="POST")
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            urllib.request.urlopen(req, timeout=5)
+        self.assertEqual(ctx.exception.code, 400)
+        self.assertIn("对象", json.loads(ctx.exception.read().decode())["error"])
 
     def test_invalid_input_is_rejected(self):
         code, body = self._post("/settings",

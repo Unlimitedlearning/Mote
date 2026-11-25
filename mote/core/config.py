@@ -50,6 +50,8 @@ DEFAULT = {
         "compact_thought_chars": 1200,
         "state_card_chars": 1600,
         "resume_messages": 8,
+        # hybrid 每轮额外带上的近几轮原文总字数；压缩上下文只管更早的背景
+        "recent_chars": 6000,
         "tools": ["now", "use_lens"],  # 初始工具：时间 + 可选镜头插件
         "system_prompt": "prompts/system.md",
         "memory_dir": "memory",

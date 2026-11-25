@@ -1,6 +1,7 @@
 """Mote · llm"""
 
 
+import http.client
 import json
 import time
 import urllib.error
@@ -24,6 +25,8 @@ class Reply:
     reasoning: str = ""
     tool_calls: list = field(default_factory=list)
     usage: dict = field(default_factory=dict)
+    # 流读到一半连接断了：已收到的正文仍然有效，上层应保留它而不是丢掉整轮
+    interrupted: bool = False
 
     def message(self, with_reasoning=False):
         """转成请求里的 assistant 消息。
@@ -134,51 +137,69 @@ class LLM:
 
     def _stream(self, resp, on_delta, on_thinking, state, should_stop=None):
         reply, calls = Reply(), {}
-        for raw in resp:
-            if should_stop and should_stop():
-                break
-            line = raw.decode("utf-8", "replace").strip()
-            if not line or line.startswith(":"):
-                continue
-            data = line[5:].strip() if line.startswith("data:") else line
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except json.JSONDecodeError:
-                continue
+        finished, stopped = False, False
+        try:
+            for raw in resp:
+                if should_stop and should_stop():
+                    stopped = True
+                    break
+                line = raw.decode("utf-8", "replace").strip()
+                if not line or line.startswith(":"):
+                    continue
+                data = line[5:].strip() if line.startswith("data:") else line
+                if data == "[DONE]":
+                    finished = True
+                    break
+                try:
+                    chunk = json.loads(data)
+                except json.JSONDecodeError:
+                    continue
 
-            if chunk.get("usage"):
-                reply.usage = chunk["usage"]
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            delta = choices[0].get("delta") or choices[0].get("message") or {}
+                if chunk.get("usage"):
+                    reply.usage = chunk["usage"]
+                    finished = True
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                delta = choices[0].get("delta") or choices[0].get("message") or {}
+                if choices[0].get("finish_reason"):
+                    finished = True
 
-            if delta.get("content"):
-                reply.content += delta["content"]
-                state["emitted"] = True
-                if on_delta:
-                    on_delta(delta["content"])
+                if delta.get("content"):
+                    reply.content += delta["content"]
+                    state["emitted"] = True
+                    if on_delta:
+                        on_delta(delta["content"])
 
-            for key in ("reasoning_content", "reasoning", "thinking"):
-                if delta.get(key):
-                    reply.reasoning += delta[key]
-                    if on_thinking:
-                        on_thinking(delta[key])
+                for key in ("reasoning_content", "reasoning", "thinking"):
+                    if delta.get(key):
+                        reply.reasoning += delta[key]
+                        if on_thinking:
+                            on_thinking(delta[key])
 
-            for item in delta.get("tool_calls") or []:
-                slot = calls.setdefault(item.get("index", len(calls)),
-                                        {"id": "", "name": "", "arguments": ""})
-                if item.get("id"):
-                    slot["id"] = item["id"]
-                fn = item.get("function") or {}
-                slot["name"] += fn.get("name") or ""
-                args = fn.get("arguments")
-                if isinstance(args, str):
-                    slot["arguments"] += args
-                elif args is not None:
-                    slot["arguments"] += json.dumps(args, ensure_ascii=False)
+                for item in delta.get("tool_calls") or []:
+                    slot = calls.setdefault(item.get("index", len(calls)),
+                                            {"id": "", "name": "", "arguments": ""})
+                    if item.get("id"):
+                        slot["id"] = item["id"]
+                    fn = item.get("function") or {}
+                    slot["name"] += fn.get("name") or ""
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        slot["arguments"] += args
+                    elif args is not None:
+                        slot["arguments"] += json.dumps(args, ensure_ascii=False)
+        except (OSError, ValueError, http.client.HTTPException) as err:
+            # 读到一半连接断了：已收到的正文仍然有效，标成 interrupted 交给上层
+            # 当「提前结束」处理；一个字都没收到才算失败，抛可重试错误走重试
+            if not (reply.content or reply.reasoning or calls):
+                raise _Retryable(f"流式读取中断: {err}") from err
+            reply.interrupted = True
+
+        # 连接正常关闭但没收到任何终止信号（[DONE] / finish_reason / usage）：
+        # 说明上游是断在半路，不是答完了。用户主动停止不算中断。
+        if not finished and not stopped and (reply.content or reply.reasoning or calls):
+            reply.interrupted = True
 
         reply.tool_calls = [calls[i] for i in sorted(calls) if calls[i]["name"]]
         for i, call in enumerate(reply.tool_calls):

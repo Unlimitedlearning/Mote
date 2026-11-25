@@ -368,9 +368,9 @@ def summarize(events):
     titles = [event.get("title") for event in events
               if event.get("t") == "title" and (event.get("title") or "").strip()]
     # 列表里的时间是「最后一次提问」而不是文件 mtime：切换分支、重命名、删除
-    # 都会追加事件，用 mtime 会让这些操作把对话顶到最前面
-    asked = [event.get("ts") for event in events
-             if event.get("t") == "user" and event.get("ts")]
+    # 都会追加事件，用 mtime 会让这些操作把对话顶到最前面。
+    # 必须只算还活着的节点，否则删掉最新一问后，列表时间还停在那条已删除的提问上。
+    asked = [event.get("ts") for event in users if event.get("ts")]
     return {
         "turns": len(users),
         "preview": clip(users[0].get("text") if users else "", 40),

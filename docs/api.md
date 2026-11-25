@@ -40,11 +40,12 @@ SSE 事件：
 | `thinking` | 推理原文的分片 |
 | `delta` | 正文分片 |
 | `tool_start` | 工具名与参数 |
-| `done` | 最终回答、`model`、`route`、`stopped` 标记、省下的字数 |
+| `done` | 最终回答、`model`、`route`、`stopped` / `interrupted` 标记、省下的字数 |
 | `error` | 错误原因 |
 
 生成失败或中断且没有任何正文时，本轮问答节点会被删除，历史里不留空问答；
-有正文的中断保留已生成内容并标记 `stopped`。
+有正文的中断保留已生成内容并标记 `stopped`。用户点停止与连接中途断掉都走这条规则，
+后者额外带 `interrupted: true`，前端据此提示「连接中断」而不是「已停止生成」。
 
 ## 检索与导出
 

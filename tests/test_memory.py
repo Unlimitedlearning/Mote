@@ -5,6 +5,7 @@ import tempfile
 import unittest
 import unittest.mock
 
+from mote.core import events as events_mod
 from mote.core.ids import DEFAULT_SESSION, new_session_id
 from mote.infra import store as store_mod
 from mote.services import conversation as conversation_mod
@@ -545,6 +546,28 @@ class SessionListCacheTest(unittest.TestCase):
                 rows = library.list_sessions(tmp)
             self.assertEqual(rows[0]["title"], "持久标题")
             self.assertEqual(rows[0]["turns"], 1)
+
+
+class DeletedTimeTest(unittest.TestCase):
+    def test_deleted_latest_question_does_not_pin_session_time(self):
+        """会话列表的时间取「最后一次提问」：删掉最新一问后不能还停在那条上。"""
+        events = [
+            {"t": "user", "turn": 1, "text": "第一问", "node": "n1", "parent": None,
+             "ts": "2026-11-25T10:00:00"},
+            {"t": "assistant", "turn": 1, "text": "答一", "node": "n1",
+             "ts": "2026-11-25T10:00:01"},
+            {"t": "user", "turn": 2, "text": "第二问", "node": "n2", "parent": "n1",
+             "ts": "2026-11-25T10:05:00"},
+            {"t": "assistant", "turn": 2, "text": "答二", "node": "n2",
+             "ts": "2026-11-25T10:05:01"},
+            {"t": "delete", "node": "n2", "nodes": ["n2"]},
+            {"t": "cursor", "node": "n1"},
+        ]
+        summary = events_mod.summarize(events)
+        self.assertEqual(summary["turns"], 1)
+        # 时间回退到还活着的最后一次提问上，而不是已删除的那条
+        self.assertEqual(summary["date"], "2026-11-25T10:00:00")
+        self.assertIn("第一问", summary["title"] + summary["preview"])
 
 
 if __name__ == "__main__":

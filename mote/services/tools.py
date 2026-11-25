@@ -61,10 +61,15 @@ def run(name, arguments, ctx=None):
 
 
 def enabled(cfg):
-    """配置里的 tools 是工具名白名单；没配就用当前注册的全部工具。"""
-    names = ((cfg.get("agent") or {}).get("tools") or [])
-    picked = [name for name in names if name in REGISTRY]
-    return picked or list(REGISTRY)
+    """配置里的 tools 是工具名白名单；键不存在时才用全部已注册工具。
+
+    显式写 `[]` 是「一个都不要」，不能退化成全开——那会让用户关不掉工具。
+    """
+    agent = cfg.get("agent") or {}
+    if "tools" not in agent:
+        return list(REGISTRY)
+    names = agent.get("tools") or []
+    return [name for name in names if name in REGISTRY]
 
 
 def new_lens_state(limit):

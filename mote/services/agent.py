@@ -273,12 +273,23 @@ class Agent:
                     "thinking": prep.get("thinking") or "", "fallback": prep["fallback"]}
 
         context_text = prep["context"] or ("当前问题：" + text)
+        # 压缩上下文只管更早的背景；最近几轮必须给原文，否则「刚才那段」在请求里根本不存在
+        # 条数为 0 表示不要原文（rebuild_messages(0) 会返回全部，所以这里显式短路）
+        resume = int(self.agent_cfg.get("resume_messages", 8))
+        recent = []
+        if self.current_parent and resume > 0:
+            recent = context.fit_tail(
+                self.memory.rebuild_messages(resume, node=self.current_parent),
+                int(self.agent_cfg.get("recent_chars", 6000)))
         base = [{"role": "system", "content": self.system_prompt},
                 {"role": "system", "content": "[压缩上下文]\n" + context_text}]
+        base += recent
+        base.append({"role": "user", "content": text})
         specs = tools_mod.specs(prep["tools"] or self.tool_names)
         lens_state = tools_mod.new_lens_state(self.agent_cfg.get("lenses_per_turn", 5))
         max_steps = int(self.agent_cfg.get("max_steps", 12))
         used, answer, steps, tail, thinking_all = [], "", 0, [], ""
+        stopped_any = interrupted_any = False
 
         for step in range(max_steps):
             steps = step + 1
@@ -286,7 +297,10 @@ class Agent:
             if reply.reasoning:
                 thinking_all += reply.reasoning
                 self.memory.note_think(self.turn, reply.reasoning, node=self.current_node)
-            stopped_now = self._stop_requested
+            # 流中途断开（interrupted）与用户点停止同样处理：已生成的正文留着收尾
+            stopped_now = self._stop_requested or getattr(reply, "interrupted", False)
+            stopped_any = stopped_any or stopped_now
+            interrupted_any = interrupted_any or bool(getattr(reply, "interrupted", False))
             self.memory.assistant(self.turn, reply.content, reply.tool_calls,
                                   model=self.profile["model"], route="cloud",
                                   thinking=thinking_all or None, node=self.current_node,
@@ -323,7 +337,9 @@ class Agent:
                 "turn": self.turn, "session": self.memory.session_id,
                 "node": self.current_node, "parent": self.current_parent,
                 "route": "cloud", "worker": self.profile["name"],
-                "model": self.profile["model"], "stopped": self._stop_requested,
+                "model": self.profile["model"],
+                "stopped": stopped_any or self._stop_requested,
+                "interrupted": interrupted_any,
                 "context_chars": len(context_text), "saved_chars": prep["saved"],
                 "thinking": thinking_all, "fallback": prep["fallback"]}
 
@@ -332,6 +348,7 @@ class Agent:
         max_steps = int(self.agent_cfg.get("max_steps", 12))
         lens_state = tools_mod.new_lens_state(self.agent_cfg.get("lenses_per_turn", 5))
         used, answer, steps, thinking_all = [], "", 0, ""
+        stopped_any = interrupted_any = False
         for step in range(max_steps):
             steps = step + 1
             self._maybe_compact()
@@ -342,7 +359,10 @@ class Agent:
             if reply.reasoning:
                 thinking_all += reply.reasoning
                 self.memory.note_think(self.turn, reply.reasoning, node=self.current_node)
-            stopped_now = self._stop_requested
+            # 流中途断开与用户点停止同样处理：已生成的正文留着收尾
+            stopped_now = self._stop_requested or getattr(reply, "interrupted", False)
+            stopped_any = stopped_any or stopped_now
+            interrupted_any = interrupted_any or bool(getattr(reply, "interrupted", False))
             self.memory.assistant(self.turn, reply.content, reply.tool_calls,
                                   model=self.profile["model"], route=route,
                                   thinking=thinking_all or None, node=self.current_node,
@@ -378,7 +398,8 @@ class Agent:
                 "node": self.current_node, "parent": self.current_parent,
                 "route": route, "worker": self.profile["name"],
                 "model": self.profile["model"], "thinking": thinking_all,
-                "stopped": self._stop_requested}
+                "stopped": stopped_any or self._stop_requested,
+                "interrupted": interrupted_any}
 
     def state_card(self):
         return self.memory.state_card(self.agent_cfg.get("state_card_chars", 1600))

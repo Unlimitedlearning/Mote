@@ -204,7 +204,8 @@ function renderMessages(keep){
       else if(m.thinking_chars)bubble.appendChild(thinkBlock('',false,'思考过程（'+m.thinking_chars+' 字）',m.node));
       const body=document.createElement('div');body.className='md';body.innerHTML=md(m.text);bubble.appendChild(body);
       if(m.stopped){
-        const note=document.createElement('div');note.className='stop-note';note.textContent='已停止生成';
+        const note=document.createElement('div');note.className='stop-note';
+        note.textContent=m.interrupted?'连接中断，已保留上面生成的内容':'已停止生成';
         bubble.appendChild(note);
       }
       const chips=[];
@@ -1083,11 +1084,18 @@ async function send(override,opts){
     const index=state.messages.indexOf(pending);
     if(index>=0)state.messages.splice(index,1);
     if(final.node){userMsg.node=final.node;userMsg.parent=final.parent||opts.parent||null;}
-    state.messages.push({role:'assistant',text:final.reply||'',lenses:final.lenses||[],
-                         route:final.route,worker:final.worker,model:final.model,
-                         thinking:final.thinking||'',saved_chars:final.saved_chars||0,
-                         node:final.node||null,parent:final.parent||opts.parent||null,
-                         mode:final.mode,stopped:!!final.stopped});
+    if(!final.node&&!final.reply){
+      // 停止时空停止：服务端已把这一轮整个撤掉，界面别留一个只有标签的空气泡
+      const at=state.messages.indexOf(userMsg);
+      if(at>=0)state.messages.splice(at,1);
+    }else{
+      state.messages.push({role:'assistant',text:final.reply||'',lenses:final.lenses||[],
+                           route:final.route,worker:final.worker,model:final.model,
+                           thinking:final.thinking||'',saved_chars:final.saved_chars||0,
+                           node:final.node||null,parent:final.parent||opts.parent||null,
+                           mode:final.mode,stopped:!!final.stopped,
+                           interrupted:!!final.interrupted});
+    }
     await loadSessions();await loadTree();renderMessages(false);scrollBottom(true);
   }catch(err){
     const index=state.messages.indexOf(pending);

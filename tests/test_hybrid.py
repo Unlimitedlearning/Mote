@@ -104,6 +104,26 @@ class HybridTest(unittest.TestCase):
         self.assertEqual(history[-1]["model"], "deepseek-chat")
         self.assertEqual(history[-1]["route"], "cloud")
 
+    def test_second_turn_carries_recent_exchanges(self):
+        """多轮是主路径：压缩背景之外必须带上近几轮原文，否则「刚才那段」不存在。"""
+        agent, router, worker = self.build(
+            '{"route":"cloud","context":"背景","tools":[]}',
+            [Reply(content="第一轮回答"), Reply(content="第二轮问题接着答")])
+        agent.ask("第一轮问题")
+        agent.ask("第二轮问题")
+
+        second = worker.calls[1]
+        contents = [msg.get("content") or "" for msg in second]
+        self.assertEqual([msg["role"] for msg in second[:2]], ["system", "system"])
+        self.assertIn("[压缩上下文]\n背景", contents[1])
+        # 上一轮的问答原文按顺序出现在请求里
+        self.assertIn("第一轮问题", contents)
+        self.assertIn("第一轮回答", contents)
+        self.assertLess(contents.index("第一轮问题"), contents.index("第一轮回答"))
+        # 当前问题必须是最后一条，且是原文而不是压缩后的概述
+        self.assertEqual(second[-1]["role"], "user")
+        self.assertEqual(second[-1]["content"], "第二轮问题")
+
     def test_mode_override_picks_path(self):
         # 单轮指定 hybrid：本地路由器参与，简单问题本地直答
         agent, router, worker = self.build(

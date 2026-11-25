@@ -71,6 +71,7 @@ class ResponseMixin:
             "context_chars": result.get("context_chars", 0),
             "fallback": bool(result.get("fallback")),
             "stopped": bool(result.get("stopped")),
+            "interrupted": bool(result.get("interrupted")),
         }
 
     def _body(self):
